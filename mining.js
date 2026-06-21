@@ -113,7 +113,9 @@ async function startLoop(bot) {
           // 這樣套件內部會優化路線，一口氣把這 8 個方塊連著挖完，中間不頓挫！
           await bot.collectBlock.collect(targets, {
             ignoreFrame: true, // 忽略副手等無關檢查，加快速度
-            count: targets.length
+            count: targets.length,
+            chestRadius: 3, // 接近方塊到半徑 3 格內就停下
+            itemRadius: 3,  // 接近掉落物到半徑 3 格內就吸取
           });
         } catch (err) {
           // 發生小錯誤（例如方塊被別人挖走）稍微等一下就好
