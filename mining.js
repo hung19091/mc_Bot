@@ -131,6 +131,7 @@ async function startLoop(bot) {
         // 執行隨機傳送
         console.log('➡️ [工作] 執行隨機傳送 /rtp...');
         state.justTeleported = true; // 🔒 啟動落地緩衝鎖
+        clearBotMemory(bot);
         bot.chat('/rtp');
         await sleep(7000);
 
@@ -226,6 +227,7 @@ async function startLoop(bot) {
 
             console.log('🚀 [工作] 基地處理完成！重新出發前往荒野挖礦...');
             state.justTeleported = true; // 🔒 再次啟動落地緩衝鎖
+            clearBotMemory(bot);
             bot.chat('/rtp');
             await sleep(7000);
 
@@ -286,6 +288,7 @@ function setupHealthAndFoodListener(bot) {
             state.isEscaping = true;
             try {
                 bot.pathfinder.stop();
+                clearBotMemory(bot);
                 bot.chat('/rtp');
                 await sleep(7000);
             } catch (err) {
@@ -296,6 +299,22 @@ function setupHealthAndFoodListener(bot) {
         }
         lastHealth = currentHealth;
     });
+}
+
+// 💡 新增：徹底清空 Bot 的尋路與採集記憶
+function clearBotMemory(bot) {
+    try {
+        // 1. 強制停止 pathfinder 並清空目標
+        bot.pathfinder.stop();
+        bot.pathfinder.setGoal(null);
+
+        // 2. 強制取消 collectBlock 的所有當前採集隊列與狀態
+        if (bot.collectBlock && typeof bot.collectBlock.cancel === 'function') {
+            bot.collectBlock.cancel();
+        }
+    } catch (err) {
+        console.log('⚠️ [清理狀態] 清除舊記憶時發生微小異常（可忽略）:', err.message);
+    }
 }
 
 module.exports = { state, startLoop };
