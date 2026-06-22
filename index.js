@@ -15,9 +15,10 @@ bot.loadPlugin(collectBlock);
 
 bot.once('spawn', () => {
   console.log('🤖 [系統] BOT 已經成功進入廢土伺服器！');
-  
+
   const mcData = require('minecraft-data')(bot.version);
   const defaultMove = new Movements(bot, mcData);
+
   bot.pathfinder.setMovements(defaultMove);
 
   console.log(`📡 [系統] 正在等待主人 ${config.MY_MASTER_ID} 的私訊指令...`);
@@ -29,7 +30,7 @@ bot.on('messagestr', (message, position) => {
 
   // 如果是 BOT 自己的名字出現在發言者位置，直接忽略
   if (msg.startsWith(config.BOT_OPTIONS.username)) return;
-  
+
   const isFromMaster = msg.includes(config.MY_MASTER_ID);
   const isPrivateMessage = msg.includes('說') || msg.includes('私訊') || msg.includes('->') || msg.includes('密語') || msg.includes('w');
 
@@ -42,15 +43,15 @@ bot.on('messagestr', (message, position) => {
         bot.chat(`/m ${config.MY_MASTER_ID} 我已經在挖土了，不要催我！`);
         return;
       }
-      
+
       bot.chat(`/m ${config.MY_MASTER_ID} 收到指令！立即開始隨機傳送並挖泥土。`);
       console.log(`🚀 [指令] 偵測到主人私訊關鍵字，啟動主循環！`);
-      
+
       mining.state.isLoopRunning = true;
       mining.state.hasNotifiedNoShovel = false;
       mining.startLoop(bot);
     }
-    
+
     // 2. 執行 storage（清空背包到告示牌箱子）
     else if (lowerMsg.includes('storage')) {
       bot.chat(`/m ${config.MY_MASTER_ID} 收到儲存指令，正在尋找 ${config.BOT_OPTIONS.username} 的告示牌箱子...`);
@@ -74,7 +75,7 @@ bot.on('messagestr', (message, position) => {
 
 // ==================== 基礎錯誤與斷線處理 ====================
 bot.on('error', (err) => {
-  if (err.message && err.message.includes('Read error')) return; 
+  if (err.message && err.message.includes('Read error')) return;
   console.log('❌ [BOT錯誤]：', err);
 });
 

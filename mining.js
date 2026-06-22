@@ -1,240 +1,301 @@
 const { goals } = require('mineflayer-pathfinder');
-const { MY_MASTER_ID, WARP_BASE_COMMAND, CHEST_POSITION } = require('./config');
+const { MY_MASTER_ID } = require('./config');
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const isInventoryFull = (bot) => bot.inventory.emptySlotCount() <= 2;
 
+const storage = require('./storage');
+const supplies = require('./supplies');
+
 // 狀態管理物件
 const state = {
-  isLoopRunning: false,
-  hasNotifiedNoShovel: false,
-  isEscaping: false, 
-  isListenerBound: false 
+    isLoopRunning: false,
+    hasNotifiedNoShovel: false,
+    isEscaping: false,
+    isEating: false,
+    justTeleported: false, // 💡 新增：落地緩衝鎖，防止傳送卡頓被誤殺
+    stuckCheckInterval: null
 };
 
-// 🛠️ 核心功能：根據方塊名稱，自動裝備正確工具
+// 核心功能：根據方塊名稱，自動裝備正確工具
 async function equipToolForBlock(bot, blockName) {
-  let toolKeyword = '';
-  
-  if (blockName.includes('dirt') || blockName.includes('grass') || blockName.includes('sand')) {
-    toolKeyword = 'shovel';    // 泥土、草地、沙子用鏟子
-  } else if (
-    blockName.includes('stone') || 
-    blockName.includes('cobblestone') || 
-    blockName.includes('andesite') || 
-    blockName.includes('diorite') || 
-    blockName.includes('granite')
-  ) {
-    toolKeyword = 'pickaxe';   // 任何石頭類用十字鎬
-  }
+    if (state.isEating) return;
 
-  if (!toolKeyword) return;
-
-  // 如果手上已經拿著對應工具，直接跳過不重複切換
-  const heldItem = bot.heldItem;
-  if (heldItem && heldItem.name.includes(toolKeyword)) return;
-
-  // 從背包尋找工具並裝備
-  const tool = bot.inventory.items().find(item => item.name.includes(toolKeyword));
-  if (tool) {
-    try {
-      await bot.equip(tool, 'hand');
-      console.log(`🔧 [工具] 偵測到挖掘方塊 ${blockName}，自動切換裝備：${tool.name}`);
-    } catch (err) {
-      console.log(`⚠️ [工具] 切換工具失敗: ${err.message}`);
+    let toolKeyword = '';
+    if (blockName.includes('dirt') || blockName.includes('grass') || blockName.includes('sand')) {
+        toolKeyword = 'shovel';
+    } else if (
+        blockName.includes('stone') || blockName.includes('cobblestone') || blockName.includes('andesite') ||
+        blockName.includes('diorite') || blockName.includes('granite')
+    ) {
+        toolKeyword = 'pickaxe';
     }
-  }
+
+    if (!toolKeyword) return;
+
+    const heldItem = bot.heldItem;
+    if (heldItem && heldItem.name.includes(toolKeyword)) return;
+
+    const tool = bot.inventory.items().find(item => item.name.includes(toolKeyword));
+    if (tool) {
+        try {
+            await bot.equip(tool, 'hand');
+            console.log(`🔧 [工具] 偵測到挖掘方塊 ${blockName}，自動切換裝備：${tool.name}`);
+        } catch (err) {
+            console.log(`⚠️ [工具] 切換工具失敗: ${err.message}`);
+        }
+    }
+}
+
+// 核心功能：獨立的防卡監控計時器
+function startStuckMonitor(bot) {
+    if (state.stuckCheckInterval) {
+        clearInterval(state.stuckCheckInterval);
+        state.stuckCheckInterval = null;
+    }
+
+    if (!bot.entity || !bot.entity.position) return;
+
+    let lastPos = bot.entity.position.clone();
+    let stuckCount = 0;
+
+    state.stuckCheckInterval = setInterval(() => {
+        if (!state.isLoopRunning || state.isEscaping || state.isEating || !bot.entity || !bot.entity.position) {
+            stuckCount = 0;
+            if (bot.entity && bot.entity.position) lastPos = bot.entity.position.clone();
+            return;
+        }
+
+        const currentPos = bot.entity.position;
+        const distance = lastPos.distanceTo(currentPos);
+
+        if (distance < 0.2) {
+            stuckCount++;
+
+            // 💡 只有在「不是剛傳送落地」的情況下，發呆滿 6 秒才執行介入
+            if (stuckCount % 6 === 0 && stuckCount !== 0) {
+                if (state.justTeleported) {
+                    console.log('⏳ [防卡緩衝] 偵測到疑似原地發呆，但目前處於落地緩衝期，不予介入。');
+                } else {
+                    console.log('🚨 [防卡自救] 確定發呆滿 6 秒！強行介入斬斷目前尋路！ 時間：' + new Date().toLocaleTimeString());
+                    bot.pathfinder.stop();
+                }
+            }
+
+            if (stuckCount >= 20) {
+                console.log('⚠️ [防卡警告] BOT 已經連續發呆超過 20 秒了！釋放計時器並重新出發...');
+                clearInterval(state.stuckCheckInterval);
+                state.stuckCheckInterval = null;
+                stuckCount = 0;
+
+                // 透過外層超時安全引導重飛
+                setTimeout(() => {
+                    if (state.isLoopRunning) startLoop(bot);
+                }, 500);
+            }
+        } else {
+            stuckCount = 0;
+            lastPos = currentPos.clone();
+        }
+    }, 1000);
 }
 
 async function startLoop(bot) {
-  // 🛠️ 首次執行時，同時綁定「受傷監聽」與「自動切工具監聽」
-  if (!state.isListenerBound) {
-    setupHealthListener(bot);
-    setupDiggingListener(bot); // 綁定挖掘監聽
-    state.isListenerBound = true;
-  }
+    // 💡 徹底解決 MaxListenersExceededWarning：每次啟動前先解綁，確保不重疊
+    setupHealthAndFoodListener(bot);
+    setupDiggingListener(bot);
 
-  try {
-    if (!state.isLoopRunning) return;
+    try {
+        if (!state.isLoopRunning) return;
 
-    // 1. 檢查身上是否還有工作用的鏟子
-    const hasShovel = bot.inventory.items().some(item => item.name.includes('shovel'));
-    if (!hasShovel) {
-      state.isLoopRunning = false; 
-      if (!state.hasNotifiedNoShovel) {
-        console.log('🛑 [工作] 沒有鏟子了，通知主人並申請 TPA 飛回去。');
-        bot.chat(`/m ${MY_MASTER_ID} 我身上沒有鏟子了，停止工作！`);
-        await sleep(1500);
-        bot.chat(`/tpa ${MY_MASTER_ID}`); 
-        state.hasNotifiedNoShovel = true;
-      }
-      return;
-    }
-
-    // 2. 執行隨機傳送到荒野
-    console.log('➡️ [工作] 執行隨機傳送 /rtp...');
-    bot.chat('/rtp');
-    await sleep(7000); 
-
-   // 3. 開始挖泥土，直到背包滿了 (優化版)
-    console.log('⛏️ [工作] 開始尋找並採集泥土...');
-    const mcData = require('minecraft-data')(bot.version);
-
-    while (!isInventoryFull(bot)) {
-      if (state.isEscaping) { await sleep(1000); continue; }
-      if (!state.isLoopRunning) return;
-
-      // 檢查鏟子
-      const currentShovel = bot.inventory.items().some(item => item.name.includes('shovel'));
-      if (!currentShovel) {
-        state.isLoopRunning = false;
-        if (!state.hasNotifiedNoShovel) {
-          bot.chat(`/m ${MY_MASTER_ID} 鏟子挖到爆了！工作中止。`);
-          await sleep(1500);
-          bot.chat(`/tpa ${MY_MASTER_ID}`);
-          state.hasNotifiedNoShovel = true;
+        // ① 首次啟動補給檢查
+        const readyToGo = await supplies.checkAndSupply(bot);
+        if (!readyToGo) {
+            state.isLoopRunning = false;
+            console.log('🛑 [工作中止] 物資未齊全，拒絕執行傳送。');
+            bot.chat(`/m ${MY_MASTER_ID} ❌ 補給點物資不足！請確認裝備區有足夠的鏟子與牛排後重新 go`);
+            return;
         }
-        return;
-      }
 
-      // 💡 加速改動：一口氣抓周圍 8 個泥土方塊，而不是只抓 1 個
-      const dirtBlocks = bot.findBlocks({
-        matching: mcData.blocksByName.dirt.id,
-        maxDistance: 10, // 縮短半徑到 10 格，離太遠的不要去，減少走遠路的時間
-        count: 8         // 一次打包 8 個目標
-      });
-
-      if (dirtBlocks.length > 0) {
-        // 將座標陣列轉換成實際的方塊物件
-        const targets = dirtBlocks.map(pos => bot.blockAt(pos)).filter(Boolean);
-        
-        try {
-          // 💡 核心加速：使用 collectBlock 的多方塊採集功能
-          // 這樣套件內部會優化路線，一口氣把這 8 個方塊連著挖完，中間不頓挫！
-          await bot.collectBlock.collect(targets, {
-            ignoreFrame: true, // 忽略副手等無關檢查，加快速度
-            count: targets.length,
-            chestRadius: 3, // 接近方塊到半徑 3 格內就停下
-            itemRadius: 3,  // 接近掉落物到半徑 3 格內就吸取
-          });
-        } catch (err) {
-          // 發生小錯誤（例如方塊被別人挖走）稍微等一下就好
-          await sleep(100); 
+        // 檢查初始鏟子
+        const hasShovel = bot.inventory.items().some(item => item.name.includes('shovel'));
+        if (!hasShovel) {
+            state.isEating = true; // 鎖定
+            bot.chat('/warp HIRO_QQX_2');
+            await sleep(7000);
+            const initialCheck = await supplies.checkAndSupply(bot);
+            state.isEating = false; // 解鎖
+            if (!initialCheck) { state.isLoopRunning = false; return; }
         }
-      } else {
-        // 如果身邊真的沒泥土了，BOT 會原地看一看，等 500 毫秒
-        await sleep(500); 
-      }
-    }
 
-    if (state.isEscaping) { await sleep(1000); return startLoop(bot); }
-
-    // 4. 背包滿了，傳送回基地
-    console.log('🎒 [工作] 背包滿了！準備回基地。');
-    bot.chat(WARP_BASE_COMMAND);
-    await sleep(7000); 
-
-    // 5. 走向箱子並把泥土放進去
-    console.log('📦 [工作] 正在走向基地箱子...');
-    const targetChest = bot.blockAt(new (require('vec3'))(...CHEST_POSITION));
-    
-    if (targetChest && (targetChest.name === 'chest' || targetChest.name === 'trapped_chest')) {
-      try {
-        await bot.pathfinder.goto(new goals.GoalGetToBlock(CHEST_POSITION[0], CHEST_POSITION[1], CHEST_POSITION[2]));
-        const chest = await bot.openChest(targetChest);
-        
-        const dirtItem = bot.inventory.items().find(item => item.name === 'dirt');
-        if (dirtItem) {
-          await chest.deposit(dirtItem.type, null, dirtItem.count);
-          console.log(`✅ [工作] 已將 ${dirtItem.count} 個泥土存入基地箱子。`);
-        }
-        chest.close();
-      } catch (err) {
-        console.log('❌ [錯誤] 走向箱子或存放時失敗：', err);
-      }
-    } else {
-      console.log('❌ [錯誤] 在指定座標找不到箱子，請確認 CHEST_POSITION 座標是否正確！');
-    }
-
-    state.hasNotifiedNoShovel = false; 
-
-    // 6. 重啟下一輪循環
-    console.log('🔄 [工作] 準備進入下一輪循環...');
-    await sleep(3000);
-    startLoop(bot);
-
-  } catch (globalErr) {
-    console.log('⚠️ [循環異常] 發生非預期錯誤...', globalErr);
-    state.isLoopRunning = false;
-  }
-}
-
-// 🛠️ 新增：監聽 BOT 的挖掘動作
-function setupDiggingListener(bot) {
-  // 當 BOT 因為任何原因（包含主動採集或尋路開路）開始挖掘方塊時觸發
-  bot.on('diggingStart', async (block) => {
-    if (!state.isLoopRunning || state.isEscaping) return;
-    
-    if (block && block.name) {
-      // 只要手一伸出去準備挖，瞬間攔截並換上對應工具
-      await equipToolForBlock(bot, block.name);
-    }
-  });
-}
-
-function setupHealthListener(bot) {
-  let lastHealth = 20;
-
-  bot.on('health', async () => {
-    if (!state.isLoopRunning) return;
-
-    // --- 1. 自動吃牛排邏輯 ---
-    // 麥塊滿肚是 20，掉到 15 以下（空 2.5 格肉) 就該補了，且確保沒在逃跑或重複吃
-    if (bot.food <= 15 && !state.isEating && !state.isEscaping) {
-      // 從背包找牛排 (cooked_beef)
-      const steak = bot.inventory.items().find(item => item.name === 'cooked_beef');
-      
-      if (steak) {
-        console.log(`🍖 [補給] 飢餓度過低 (${bot.food}/20)，開始吃牛排...`);
-        state.isEating = true;
-        
-        try {
-          bot.pathfinder.stop(); // 停止走路，專心吃飯
-          await bot.equip(steak, 'hand'); // 手拿牛排
-          await bot.consume(); // 啃牛排（內建會等待吃完的動畫時間）
-          console.log(`✅ [補給] 牛排吃飽了！目前飢餓度: ${bot.food}/20`);
-        } catch (err) {
-          console.log(`⚠️ [補給] 吃牛排失敗: ${err.message}`);
-        } finally {
-          state.isEating = false; // 恢復常態
-        }
-      } else {
-        // 如果背包沒牛排了，每隔一陣子在控制台提醒你
-        console.log('⚠️ [警告] BOT 肚子餓了，但背包裡找不到「cooked_beef」（牛排）！');
-      }
-    }
-
-    // --- 2. 受傷逃跑邏輯 ---
-    const currentHealth = bot.health;
-    if (currentHealth < lastHealth) {
-      if (state.isEscaping || state.isEating) { 
-        lastHealth = currentHealth; 
-        return; 
-      }
-      console.log(`🚨 [安全防護] BOT 受傷了！立刻執行緊急 /rtp 逃跑！`);
-      state.isEscaping = true;
-      try {
-        bot.pathfinder.stop();
+        // 執行隨機傳送
+        console.log('➡️ [工作] 執行隨機傳送 /rtp...');
+        state.justTeleported = true; // 🔒 啟動落地緩衝鎖
         bot.chat('/rtp');
         await sleep(7000);
-      } catch (err) {
-        console.log('⚠️ [安全防護] 逃跑異常:', err);
-      } finally {
-        state.isEscaping = false;
-      }
+
+        console.log('⚡ [系統] 已到達荒野，正式啟動防卡發呆監控。');
+        startStuckMonitor(bot);
+
+        // 落地 3 秒後解除緩衝鎖，給予充足的尋路加載時間
+        setTimeout(() => {
+            state.justTeleported = false;
+            console.log('🔓 [系統] 落地緩衝期結束，防卡自救完全生效。');
+        }, 5000);
+
+        const mcData = require('minecraft-data')(bot.version);
+
+        while (state.isLoopRunning) {
+            let shovelExploded = false;
+
+            // 3. 採集主迴圈
+            while (!isInventoryFull(bot)) {
+                if (state.isEscaping || state.isEating) { await sleep(1000); continue; }
+                if (!state.isLoopRunning) return;
+
+                const allDirtPositions = bot.findBlocks({
+                    matching: mcData.blocksByName.dirt.id,
+                    maxDistance: 10,
+                    count: 30
+                });
+
+                const currentBotY = bot.entity.position.y;
+                const filteredPositions = allDirtPositions.filter(pos => {
+                    const yDiff = pos.y - currentBotY;
+                    return yDiff <= 1.5 && yDiff >= -2.5;
+                }).slice(0, 8);
+
+                if (filteredPositions.length > 0) {
+                    const targets = filteredPositions.map(pos => bot.blockAt(pos)).filter(Boolean);
+                    try {
+                        await bot.collectBlock.collect(targets, {
+                            ignoreFrame: true,
+                            count: targets.length,
+                            chestRadius: 3,
+                            itemRadius: 3,
+                        });
+                    } catch (err) {
+                        // 檢查工具是否損壞
+                        const hasShovelNow = bot.inventory.items().some(item => item.name.includes('shovel'));
+                        if (!hasShovelNow) {
+                            console.log('💥 [工作] 挖掘中斷且無鏟子！判定工具損壞，觸發自動補給...');
+                            shovelExploded = true;
+                            break;
+                        }
+                        console.log('🔄 [工作] 挖掘被中斷（方塊更新或被強制換目標），重新搜尋新目標...');
+                        await sleep(600);
+                    }
+                } else {
+                    await sleep(600);
+                }
+            }
+
+            if (state.isEscaping || state.isEating) { await sleep(1000); continue; }
+            if (!state.isLoopRunning) return;
+
+            // 關閉防卡，回家
+            if (state.stuckCheckInterval) clearInterval(state.stuckCheckInterval);
+            state.isEating = true; // 啟用基地商務鎖，防止尋路被中斷
+
+            console.log('🚶 [工作] 開始返回基地進行後續處理...');
+            bot.chat('/warp HIRO_QQX_2');
+            await sleep(7000);
+
+            if (!shovelExploded) {
+                try {
+                    console.log('🎒 [工作] 偵測到滿包，正在走向「倉儲區」箱子...');
+                    await storage.storeAllItemsToSignChest(bot, '倉儲區');
+                } catch (storeErr) {
+                    console.log('❌ [儲存錯誤] 自動存箱時發生異常：', storeErr.message);
+                }
+            }
+
+            try {
+                console.log('🔄 [補給] 正在檢查與補給裝備物資...');
+                const finalCheck = await supplies.checkAndSupply(bot);
+                if (!finalCheck) {
+                    state.isLoopRunning = false;
+                    state.isEating = false;
+                    return;
+                }
+            } catch (supErr) {
+                console.log('❌ [補給錯誤] 補給異常：', supErr.message);
+            }
+
+            state.isEating = false; // 解除基地商務鎖
+
+            console.log('🚀 [工作] 基地處理完成！重新出發前往荒野挖礦...');
+            state.justTeleported = true; // 🔒 再次啟動落地緩衝鎖
+            bot.chat('/rtp');
+            await sleep(7000);
+
+            startStuckMonitor(bot);
+            setTimeout(() => { state.justTeleported = false; }, 5000);
+        }
+    } catch (globalErr) {
+        console.log('⚠️ [循環異常] 發生非預期錯誤...', globalErr);
+        state.isLoopRunning = false;
+        if (state.stuckCheckInterval) clearInterval(state.stuckCheckInterval);
     }
-    lastHealth = currentHealth;
-  });
+}
+
+function setupDiggingListener(bot) {
+    // 先移除舊的，防止 Memory Leak
+    bot.removeAllListeners('diggingStart');
+    bot.on('diggingStart', async (block) => {
+        if (!state.isLoopRunning || state.isEscaping || state.isEating) return;
+        if (block && block.name) {
+            await equipToolForBlock(bot, block.name);
+        }
+    });
+}
+
+function setupHealthAndFoodListener(bot) {
+    // 先移除舊的，防止 Memory Leak
+    bot.removeAllListeners('health');
+    let lastHealth = bot.health || 20;
+
+    bot.on('health', async () => {
+        if (!state.isLoopRunning) return;
+
+        if (bot.food <= 15 && !state.isEating && !state.isEscaping) {
+            const steak = bot.inventory.items().find(item => item.name === 'cooked_beef');
+            if (steak) {
+                console.log(`🍖 [補給] 飢餓度過低 (${bot.food}/20)，開始吃牛排...`);
+                state.isEating = true;
+                try {
+                    bot.pathfinder.stop();
+                    await bot.equip(steak, 'hand');
+                    await bot.consume();
+                    console.log(`✅ [補給] 牛排吃飽了！目前飢餓度: ${bot.food}/20`);
+                } catch (err) {
+                    console.log(`⚠️ [補給] 吃牛排失敗: ${err.message}`);
+                } finally {
+                    state.isEating = false;
+                }
+            }
+        }
+
+        const currentHealth = bot.health;
+        if (currentHealth < lastHealth) {
+            if (state.isEscaping || state.isEating) {
+                lastHealth = currentHealth;
+                return;
+            }
+            console.log(`🚨 [安全防護] BOT 受傷了！立刻執行緊急 /rtp 逃跑！`);
+            state.isEscaping = true;
+            try {
+                bot.pathfinder.stop();
+                bot.chat('/rtp');
+                await sleep(7000);
+            } catch (err) {
+                console.log('⚠️ [安全防護] 逃跑異常:', err);
+            } finally {
+                state.isEscaping = false;
+            }
+        }
+        lastHealth = currentHealth;
+    });
 }
 
 module.exports = { state, startLoop };
