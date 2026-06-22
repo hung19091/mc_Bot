@@ -182,7 +182,7 @@ async function startLoop(bot) {
                             shovelExploded = true;
                             break;
                         }
-                        console.log('🔄 [工作] 挖掘被中斷（方塊更新或被強制換目標），重新搜尋新目標...');
+                        console.log('🔄 [工作] 挖掘被中斷（方塊更新或被強制換目標），重新搜尋新目標...' + err.message);
                         await sleep(600);
                     }
                 } else {
