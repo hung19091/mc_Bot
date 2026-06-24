@@ -3,6 +3,41 @@ const { MY_MASTER_ID } = require('./config');
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+const STORAGE_CONFIG = {
+    signSearchDistance: 16,
+    signSearchCount: 20,
+    chestPathSleepMs: 200
+};
+
+const CHEST_BLOCK_NAMES = new Set(['chest', 'trapped_chest']);
+
+function getSignText(block) {
+    if (block.signText) return block.signText;
+    if (block.blockEntity && block.blockEntity.frontText) {
+        return block.blockEntity.frontText.messages.join(' ');
+    }
+    return '';
+}
+
+function getAdjacentPositions(pos) {
+    return [
+        pos.offset(1, 0, 0), pos.offset(-1, 0, 0),
+        pos.offset(0, 1, 0), pos.offset(0, -1, 0),
+        pos.offset(0, 0, 1), pos.offset(0, 0, -1)
+    ];
+}
+
+function findAdjacentChest(bot, pos) {
+    const directions = getAdjacentPositions(pos);
+    for (const adjPos of directions) {
+        const adjBlock = bot.blockAt(adjPos);
+        if (adjBlock && CHEST_BLOCK_NAMES.has(adjBlock.name)) {
+            return adjBlock;
+        }
+    }
+    return null;
+}
+
 async function storeAllItemsToSignChest(bot, keyword = '倉儲區') {
     try {
         const mcData = require('minecraft-data')(bot.version);
@@ -15,8 +50,8 @@ async function storeAllItemsToSignChest(bot, keyword = '倉儲區') {
         console.log('🔍 [儲存] 正在掃描周圍的告示牌...');
         const signBlocks = bot.findBlocks({
             matching: signBlockIds,
-            maxDistance: 16,
-            count: 20
+            maxDistance: STORAGE_CONFIG.signSearchDistance,
+            count: STORAGE_CONFIG.signSearchCount
         });
 
         if (signBlocks.length === 0) {
@@ -29,30 +64,13 @@ async function storeAllItemsToSignChest(bot, keyword = '倉儲區') {
         // 2. 遍歷找到的告示牌，檢查上面的文字
         for (const pos of signBlocks) {
             const block = bot.blockAt(pos);
-            let signText = '';
-            if (block.signText) {
-                signText = block.signText;
-            } else if (block.blockEntity && block.blockEntity.frontText) {
-                signText = block.blockEntity.frontText.messages.join(' ');
-            }
+            const signText = getSignText(block);
 
             if (signText.includes('HIRO_NAGA') && signText.includes(keyword)) {
                 console.log(`🎯 [儲存] 找到匹配的告示牌，座標: ${pos}`);
 
                 // 3. 尋找這個告示牌鄰近（上下左右前後 1 格內）的箱子
-                const directions = [
-                    pos.offset(1, 0, 0), pos.offset(-1, 0, 0),
-                    pos.offset(0, 1, 0), pos.offset(0, -1, 0),
-                    pos.offset(0, 0, 1), pos.offset(0, 0, -1)
-                ];
-
-                for (const adjPos of directions) {
-                    const adjBlock = bot.blockAt(adjPos);
-                    if (adjBlock && (adjBlock.name === 'chest' || adjBlock.name === 'trapped_chest')) {
-                        targetChestBlock = adjBlock;
-                        break;
-                    }
-                }
+                targetChestBlock = findAdjacentChest(bot, pos);
                 if (targetChestBlock) break;
             }
         }
@@ -89,7 +107,7 @@ async function storeAllItemsToSignChest(bot, keyword = '倉儲區') {
             try {
                 await chest.deposit(item.type, null, item.count);
                 console.log(`✅ [儲存] 成功存入: ${item.name} x${item.count}`);
-                await sleep(200);
+                await sleep(STORAGE_CONFIG.chestPathSleepMs);
             } catch (depositErr) {
                 console.log(`⚠️ [儲存] 無法存入物品 ${item.name}：`, depositErr);
             }

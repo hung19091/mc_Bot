@@ -3,6 +3,46 @@ const { MY_MASTER_ID } = require('./config');
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+const SUPPLY_CONFIG = {
+    steakMinToStart: 20,
+    steakTargetCount: 64,
+    warpWaitMs: 7000,
+    signSearchDistance: 16,
+    signSearchCount: 20,
+    afterOpenChestWaitMs: 500,
+    actionPauseMs: 300,
+    afterCloseChestWaitMs: 500
+};
+
+const CHEST_BLOCK_NAMES = new Set(['chest', 'trapped_chest']);
+
+function getSignText(block) {
+    if (block.signText) return block.signText;
+    if (block.blockEntity && block.blockEntity.frontText) {
+        return block.blockEntity.frontText.messages.join(' ');
+    }
+    return '';
+}
+
+function getAdjacentPositions(pos) {
+    return [
+        pos.offset(1, 0, 0), pos.offset(-1, 0, 0),
+        pos.offset(0, 1, 0), pos.offset(0, -1, 0),
+        pos.offset(0, 0, 1), pos.offset(0, 0, -1)
+    ];
+}
+
+function findAdjacentChest(bot, pos) {
+    const directions = getAdjacentPositions(pos);
+    for (const adjPos of directions) {
+        const adjBlock = bot.blockAt(adjPos);
+        if (adjBlock && CHEST_BLOCK_NAMES.has(adjBlock.name)) {
+            return adjBlock;
+        }
+    }
+    return null;
+}
+
 /**
  * 檢查身上是否有特定物品
  * @param {Object} bot Mineflayer 實例
@@ -32,7 +72,7 @@ async function checkAndSupply(bot) {
         // 1. 檢查自己身上是否有三件套
         const hasShovel = hasItem(bot, 'shovel', 1);
         const hasPickaxe = hasItem(bot, 'pickaxe', 1);
-        const hasSteak = hasItem(bot, 'cooked_beef', 20);
+        const hasSteak = hasItem(bot, 'cooked_beef', SUPPLY_CONFIG.steakMinToStart);
 
         if (hasShovel && hasPickaxe && hasSteak) {
             console.log('✅ [補給檢查] 物品齊全，準備出發！');
@@ -43,7 +83,7 @@ async function checkAndSupply(bot) {
 
         // 2. 執行傳送到裝備區
         bot.chat('/warp HIRO_QQX_2');
-        await sleep(7000); // 等待傳送與地圖載入
+        await sleep(SUPPLY_CONFIG.warpWaitMs); // 等待傳送與地圖載入
 
         // 3. 尋找告示牌
         const mcData = require('minecraft-data')(bot.version);
@@ -53,39 +93,22 @@ async function checkAndSupply(bot) {
 
         const signBlocks = bot.findBlocks({
             matching: signBlockIds,
-            maxDistance: 16,
-            count: 20
+            maxDistance: SUPPLY_CONFIG.signSearchDistance,
+            count: SUPPLY_CONFIG.signSearchCount
         });
 
         let targetChestBlock = null;
 
         for (const pos of signBlocks) {
             const block = bot.blockAt(pos);
-            let signText = '';
-            if (block.signText) {
-                signText = block.signText;
-            } else if (block.blockEntity && block.blockEntity.frontText) {
-                signText = block.blockEntity.frontText.messages.join(' ');
-            }
+            const signText = getSignText(block);
 
             // 🔍 檢查告示牌是否包含指定文字
             if (signText.includes('HIRO_NAGA') && signText.includes('裝備區')) {
                 console.log(`🎯 [補給] 找到「HIRO_NAGA 裝備區」告示牌，座標: ${pos}`);
 
                 // 尋找鄰近 1 格內的箱子
-                const directions = [
-                    pos.offset(1, 0, 0), pos.offset(-1, 0, 0),
-                    pos.offset(0, 1, 0), pos.offset(0, -1, 0),
-                    pos.offset(0, 0, 1), pos.offset(0, 0, -1)
-                ];
-
-                for (const adjPos of directions) {
-                    const adjBlock = bot.blockAt(adjPos);
-                    if (adjBlock && (adjBlock.name === 'chest' || adjBlock.name === 'trapped_chest')) {
-                        targetChestBlock = adjBlock;
-                        break;
-                    }
-                }
+                targetChestBlock = findAdjacentChest(bot, pos);
                 if (targetChestBlock) break;
             }
         }
@@ -101,7 +124,7 @@ async function checkAndSupply(bot) {
         await bot.pathfinder.goto(new goals.GoalGetToBlock(targetChestBlock.position.x, targetChestBlock.position.y, targetChestBlock.position.z));
 
         const chest = await bot.openChest(targetChestBlock);
-        await sleep(500);
+        await sleep(SUPPLY_CONFIG.afterOpenChestWaitMs);
 
         // 5. 根據缺少的東西，精準拿取
         // 檢查箱子裡的物品清單
@@ -113,7 +136,7 @@ async function checkAndSupply(bot) {
             if (chestShovel) {
                 console.log(`📥 [補給] 從箱子拿取鏟子: ${chestShovel.name}`);
                 await chest.withdraw(chestShovel.type, null, 1);
-                await sleep(300);
+                await sleep(SUPPLY_CONFIG.actionPauseMs);
             } else {
                 console.log('⚠️ [補給警告] 箱子裡沒有鏟子了！');
             }
@@ -125,7 +148,7 @@ async function checkAndSupply(bot) {
             if (chestPickaxe) {
                 console.log(`📥 [補給] 從箱子拿取十字鎬: ${chestPickaxe.name}`);
                 await chest.withdraw(chestPickaxe.type, null, 1);
-                await sleep(300);
+                await sleep(SUPPLY_CONFIG.actionPauseMs);
             } else {
                 console.log('⚠️ [補給警告] 箱子裡沒有十字鎬了！');
             }
@@ -133,8 +156,8 @@ async function checkAndSupply(bot) {
 
         // 🍖 補牛排至 64 個
         const currentSteakCount = getItemCount(bot, 'cooked_beef');
-        if (currentSteakCount < 64) {
-            const neededSteak = 64 - currentSteakCount;
+        if (currentSteakCount < SUPPLY_CONFIG.steakTargetCount) {
+            const neededSteak = SUPPLY_CONFIG.steakTargetCount - currentSteakCount;
             const chestSteak = chestItems.find(item => item.name === 'cooked_beef');
 
             if (chestSteak) {
@@ -142,7 +165,7 @@ async function checkAndSupply(bot) {
                 const amountToTake = Math.min(neededSteak, chestSteak.count);
                 console.log(`📥 [補給] 從箱子拿取牛排 x${amountToTake}`);
                 await chest.withdraw(chestSteak.type, null, amountToTake);
-                await sleep(300);
+                await sleep(SUPPLY_CONFIG.actionPauseMs);
             } else {
                 console.log('⚠️ [補給警告] 箱子裡沒有牛排了！');
             }
@@ -150,12 +173,12 @@ async function checkAndSupply(bot) {
 
         // 關閉箱子
         chest.close();
-        await sleep(500);
+        await sleep(SUPPLY_CONFIG.afterCloseChestWaitMs);
 
         // 6. 最終驗證：拿完之後再次檢查，避免箱子沒資源導致死循環
         const finalShovel = hasItem(bot, 'shovel', 1);
         const finalPickaxe = hasItem(bot, 'pickaxe', 1);
-        const finalSteak = hasItem(bot, 'cooked_beef', 20); // 拿完後至少要有20個才給出發
+        const finalSteak = hasItem(bot, 'cooked_beef', SUPPLY_CONFIG.steakMinToStart); // 拿完後至少要有20個才給出發
 
         if (finalShovel && finalPickaxe && finalSteak) {
             console.log('✅ [補給檢查] 補給完畢，準備出發！');
