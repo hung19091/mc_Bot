@@ -61,16 +61,12 @@ bot.on('messagestr', (message, position) => {
 });
 
 // ==================== 功能：自動同意 TPA ====================
-bot.on('chat', (username, message) => {
-  if (message.includes(config.MY_MASTER_ID) && (message.includes('請求') || message.includes('傳送') || message.includes('tpa'))) {
-    bot.chat('/tpaccept');
-  }
-});
-
 bot.on('messagestr', (message, position) => {
   if (message.includes(config.MY_MASTER_ID) && (message.includes('請求') || message.includes('傳送'))) {
     bot.chat('/tpaccept');
   }
+
+  console.log(message);
 });
 
 // ==================== 基礎錯誤與斷線處理 ====================
@@ -78,5 +74,6 @@ bot.on('error', (err) => {
   if (err.message && err.message.includes('Read error')) return;
   console.log('❌ [BOT錯誤]：', err);
 });
+
 
 bot.on('kicked', (reason) => console.log('🚪 [斷線] 被伺服器踢出：', reason));

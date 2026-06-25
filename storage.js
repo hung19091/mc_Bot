@@ -96,7 +96,7 @@ async function storeAllItemsToSignChest(bot, keyword = '倉儲區') {
         }
 
         chest.close();
-        bot.chat(`/m ${MY_MASTER_ID} 🎉 身上物品已全數嘗試存入告示牌箱子！`);
+        //bot.chat(`/m ${MY_MASTER_ID} 🎉 身上物品已全數嘗試存入告示牌箱子！`);
 
     } catch (err) {
         console.error('❌ [儲存錯誤]', err);
