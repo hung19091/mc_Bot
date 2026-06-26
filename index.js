@@ -5,6 +5,7 @@ const collectBlock = require('mineflayer-collectblock').plugin;
 const config = require('./config');
 const mining = require('./mining');
 const storage = require('./storage');
+const taskManager = require('./taskManager');
 
 // 創建 BOT 實例
 const bot = mineflayer.createBot(config.BOT_OPTIONS);
@@ -22,6 +23,8 @@ bot.once('spawn', () => {
   bot.pathfinder.setMovements(defaultMove);
 
   console.log(`📡 [系統] 正在等待主人 ${config.MY_MASTER_ID} 的私訊指令...`);
+
+  taskManager.startTaskLoop(bot, mining); // 💡 BOT 登入後，自動開啟任務循環監聽
 });
 
 // ==================== 功能：監聽來自你的私訊 ====================
