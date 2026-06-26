@@ -9,7 +9,7 @@ const LOOP_CONFIG = {
     hungryThreshold: 15,
     steakMinToStart: 20,
     defaultHealth: 20,
-    hostileDistance: 12
+    damageSourceCheckRadius: 4
 };
 
 const WARP_BASE_COMMAND = '/warp HIRO_QQX_2';
@@ -100,13 +100,13 @@ function isInventoryFull(bot) {
     return bot.inventory.emptySlotCount() <= 2;
 }
 
-function detectNearbyHostile(bot) {
+function wasDamagedByHostileMob(bot) {
     if (!bot.entity || !bot.entity.position) {
         return false;
     }
 
-    const entities = Object.values(bot.entities || {});
-    return entities.some((entity) => {
+    // 只在受傷當下做一次近距離判斷，避免每 tick 都掃描全實體。
+    const attacker = bot.nearestEntity((entity) => {
         if (!entity || entity.type !== 'mob' || !entity.name || !entity.position) {
             return false;
         }
@@ -115,8 +115,10 @@ function detectNearbyHostile(bot) {
             return false;
         }
 
-        return bot.entity.position.distanceTo(entity.position) <= LOOP_CONFIG.hostileDistance;
+        return bot.entity.position.distanceTo(entity.position) <= LOOP_CONFIG.damageSourceCheckRadius;
     });
+
+    return Boolean(attacker);
 }
 
 function installHealthDamageSensor(bot) {
@@ -136,8 +138,13 @@ function installHealthDamageSensor(bot) {
 
         const currentHealth = bot.health || LOOP_CONFIG.defaultHealth;
         if (currentHealth < state.lastHealth) {
-            state.damageDetected = true;
-            console.log(`⚠️ [FSM] 受傷偵測！血量: ${state.lastHealth} -> ${currentHealth}`);
+            const hitByHostileMob = wasDamagedByHostileMob(bot);
+            if (hitByHostileMob) {
+                state.damageDetected = true;
+                console.log(`⚠️ [FSM] 受傷且來源為 hostile mob！血量: ${state.lastHealth} -> ${currentHealth}`);
+            } else {
+                console.log(`ℹ️ [FSM] 受傷但非 hostile mob 來源，忽略 RTP。血量: ${state.lastHealth} -> ${currentHealth}`);
+            }
         }
 
         state.lastHealth = currentHealth;
@@ -145,7 +152,7 @@ function installHealthDamageSensor(bot) {
 }
 
 function hasThreat() {
-    return state.damageDetected || state.enemyDetected;
+    return state.damageDetected;
 }
 
 function shouldEat(bot) {
@@ -280,11 +287,6 @@ async function tickStateMachine(bot) {
     state.isTicking = true;
 
     try {
-        state.enemyDetected = detectNearbyHostile(bot);
-        if (state.enemyDetected) {
-            console.log(`⚠️ [Detect] 周邊偵測到敵對生物！`);
-        }
-
         // 透過 Rule Engine 選優先序最高的規則
         const rule = pickRuleByPriority(bot);
         if (!rule) {
