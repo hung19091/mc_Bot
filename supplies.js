@@ -16,6 +16,7 @@ const SUPPLY_CONFIG = {
 
 const CHEST_BLOCK_NAMES = new Set(['chest', 'trapped_chest']);
 
+// 兼容不同版本告示牌資料格式。
 function getSignText(block) {
     if (block.signText) return block.signText;
     if (block.blockEntity && block.blockEntity.frontText) {
@@ -32,6 +33,7 @@ function getAdjacentPositions(pos) {
     ];
 }
 
+// 從告示牌周圍找可互動箱子。
 function findAdjacentChest(bot, pos) {
     const directions = getAdjacentPositions(pos);
     for (const adjPos of directions) {

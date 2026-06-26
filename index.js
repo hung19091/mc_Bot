@@ -3,8 +3,7 @@ const { pathfinder, Movements } = require('mineflayer-pathfinder');
 const collectBlock = require('mineflayer-collectblock').plugin;
 
 const config = require('./config');
-const mining = require('./mining');
-const storage = require('./storage');
+const fsm = require('./fsm');
 
 // 創建 BOT 實例
 const bot = mineflayer.createBot(config.BOT_OPTIONS);
@@ -24,6 +23,16 @@ bot.once('spawn', () => {
   console.log(`📡 [系統] 正在等待主人 ${config.MY_MASTER_ID} 的私訊指令...`);
 });
 
+function isFromMasterPrivateMessage(msg) {
+  const isFromMaster = msg.includes(config.MY_MASTER_ID);
+  const isPrivateMessage = msg.includes('說') || msg.includes('私訊') || msg.includes('->') || msg.includes('密語') || msg.includes('w');
+  return isFromMaster && isPrivateMessage;
+}
+
+function isTeleportRequest(msg) {
+  return msg.includes(config.MY_MASTER_ID) && (msg.includes('請求') || msg.includes('傳送') || msg.toLowerCase().includes('tpa'));
+}
+
 // ==================== 功能：監聽來自你的私訊 ====================
 bot.on('messagestr', (message, position) => {
   const msg = message.trim();
@@ -31,45 +40,43 @@ bot.on('messagestr', (message, position) => {
   // 如果是 BOT 自己的名字出現在發言者位置，直接忽略
   if (msg.startsWith(config.BOT_OPTIONS.username)) return;
 
-  const isFromMaster = msg.includes(config.MY_MASTER_ID);
-  const isPrivateMessage = msg.includes('說') || msg.includes('私訊') || msg.includes('->') || msg.includes('密語') || msg.includes('w');
+  if (isTeleportRequest(msg)) {
+    bot.chat('/tpaccept');
+    return;
+  }
 
-  if (isFromMaster && isPrivateMessage) {
+  if (isFromMasterPrivateMessage(msg)) {
     const lowerMsg = msg.toLowerCase();
 
-    // 1. 執行 go（挖土）
+    // 1. 啟動狀態機循環
     if (lowerMsg.includes('go')) {
-      if (mining.state.isLoopRunning) {
-        bot.chat(`/m ${config.MY_MASTER_ID} 我已經在挖土了，不要催我！`);
+      if (fsm.state.isLoopRunning) {
+        bot.chat(`/m ${config.MY_MASTER_ID} 我已經在執行中了。`);
         return;
       }
 
-      bot.chat(`/m ${config.MY_MASTER_ID} 收到指令！立即開始隨機傳送並挖泥土。`);
-      console.log(`🚀 [指令] 偵測到主人私訊關鍵字，啟動主循環！`);
-
-      mining.state.isLoopRunning = true;
-      mining.state.hasNotifiedNoShovel = false;
-      mining.startLoop(bot);
+      bot.chat(`/m ${config.MY_MASTER_ID} 收到 go，切換到狀態機模式開始工作。`);
+      console.log('🚀 [指令] 啟動狀態機主循環。');
+      fsm.startLoop(bot);
+      return;
     }
 
-    // 2. 執行 storage（清空背包到告示牌箱子）
-    else if (lowerMsg.includes('storage')) {
-      bot.chat(`/m ${config.MY_MASTER_ID} 收到儲存指令，正在尋找 ${config.BOT_OPTIONS.username} 的告示牌箱子...`);
-      storage.storeAllItemsToSignChest(bot);
+    // 2. 觸發狀態機中的儲存流程
+    if (lowerMsg.includes('storage')) {
+      if (!fsm.state.isLoopRunning) {
+        fsm.startLoop(bot);
+      }
+
+      fsm.requestStorage();
+      bot.chat(`/m ${config.MY_MASTER_ID} 收到 storage，已加入狀態機佇列。`);
+      return;
     }
-  }
-});
 
-// ==================== 功能：自動同意 TPA ====================
-bot.on('chat', (username, message) => {
-  if (message.includes(config.MY_MASTER_ID) && (message.includes('請求') || message.includes('傳送') || message.includes('tpa'))) {
-    bot.chat('/tpaccept');
-  }
-});
-
-bot.on('messagestr', (message, position) => {
-  if (message.includes(config.MY_MASTER_ID) && (message.includes('請求') || message.includes('傳送'))) {
-    bot.chat('/tpaccept');
+    // 3. 停止狀態機循環
+    if (lowerMsg.includes('stop')) {
+      fsm.stopLoop();
+      bot.chat(`/m ${config.MY_MASTER_ID} 收到 stop，已停止狀態機。`);
+    }
   }
 });
 
