@@ -48,6 +48,54 @@ const state = {
     currentState: FSM_STATE.Idle
 };
 
+// Rule Engine：優先權表驅動決策。排序一次在 startLoop，避免每 tick 重排。
+let sortedRules = [];
+
+const rules = [
+    {
+        name: FSM_STATE.Escape,
+        priority: 100,
+        condition: () => hasThreat(),
+        action: runEscape
+    },
+    {
+        name: FSM_STATE.Eat,
+        priority: 90,
+        condition: (bot) => shouldEat(bot),
+        action: runEat
+    },
+    {
+        name: FSM_STATE.ManualStorage,
+        priority: 80,
+        condition: () => state.pendingStorage,
+        action: runManualStorage
+    },
+    {
+        name: FSM_STATE.Supply,
+        priority: 70,
+        condition: (bot) => needSupplies(bot),
+        action: runSupply
+    },
+    {
+        name: FSM_STATE.InventoryStorage,
+        priority: 60,
+        condition: (bot) => isInventoryFull(bot),
+        action: runInventoryStorage
+    },
+    {
+        name: FSM_STATE.EnsureWild,
+        priority: 50,
+        condition: () => !state.isInWild,
+        action: runEnsureWild
+    },
+    {
+        name: FSM_STATE.Mine,
+        priority: 10,
+        condition: () => true,  // 總是可以執行（fallback）
+        action: runMine
+    }
+];
+
 function isInventoryFull(bot) {
     return bot.inventory.emptySlotCount() <= 2;
 }
@@ -110,33 +158,18 @@ function needSupplies(bot) {
     return !(hasShovel && hasPickaxe && hasSteak);
 }
 
-function decideNextState(bot) {
-    // 決策優先序：生存 > 後勤 > 工作。
-    if (hasThreat()) {
-        return FSM_STATE.Escape;
+function pickRuleByPriority(bot) {
+    // 遍歷排序好的 rules，取第一個 condition 為 true 的規則。
+    for (const rule of sortedRules) {
+        try {
+            if (rule.condition(bot)) {
+                return rule;
+            }
+        } catch (err) {
+            console.log(`⚠️ [FSM] Rule "${rule.name}" condition error:`, err.message);
+        }
     }
-
-    if (shouldEat(bot)) {
-        return FSM_STATE.Eat;
-    }
-
-    if (state.pendingStorage) {
-        return FSM_STATE.ManualStorage;
-    }
-
-    if (needSupplies(bot)) {
-        return FSM_STATE.Supply;
-    }
-
-    if (isInventoryFull(bot)) {
-        return FSM_STATE.InventoryStorage;
-    }
-
-    if (!state.isInWild) {
-        return FSM_STATE.EnsureWild;
-    }
-
-    return FSM_STATE.Mine;
+    return null;  // 不應該發生（Mine 總是 true）
 }
 
 async function runEscape(bot) {
@@ -229,33 +262,21 @@ async function tickStateMachine(bot) {
 
     try {
         state.enemyDetected = detectNearbyHostile(bot);
-        state.currentState = decideNextState(bot);
 
-        switch (state.currentState) {
-            case FSM_STATE.Escape:
-                await runEscape(bot);
-                break;
-            case FSM_STATE.Eat:
-                await runEat(bot);
-                break;
-            case FSM_STATE.ManualStorage:
-                await runManualStorage(bot);
-                break;
-            case FSM_STATE.Supply:
-                await runSupply(bot);
-                break;
-            case FSM_STATE.InventoryStorage:
-                await runInventoryStorage(bot);
-                break;
-            case FSM_STATE.EnsureWild:
-                await runEnsureWild(bot);
-                break;
-            case FSM_STATE.Mine:
-                await runMine(bot);
-                break;
-            default:
-                break;
+        // 透過 Rule Engine 選優先序最高的規則
+        const rule = pickRuleByPriority(bot);
+        if (!rule) {
+            console.log('❌ [FSM] No rule matched');
+            state.isTicking = false;
+            return;
         }
+
+        if (state.currentState !== rule.name) {
+            console.log(`[FSM] ${state.currentState} -> ${rule.name}`);
+        }
+
+        state.currentState = rule.name;
+        await rule.action(bot);
     } catch (err) {
         console.log('❌ [FSM] Tick error:', err && err.message ? err.message : err);
     } finally {
@@ -280,6 +301,9 @@ function startLoop(bot) {
     state.enemyDetected = false;
     state.currentState = FSM_STATE.Idle;
     state.mcData = require('minecraft-data')(bot.version);
+
+    // Rule Engine 初始化：預先排序一次，避免每 tick 都重排。
+    sortedRules = [...rules].sort((a, b) => b.priority - a.priority);
 
     // 血量監聽採單次安裝，避免重複綁定造成多次觸發。
     installHealthDamageSensor(bot);
