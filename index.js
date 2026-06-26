@@ -36,9 +36,10 @@ function isTeleportRequest(msg) {
 // ==================== 功能：監聽來自你的私訊 ====================
 bot.on('messagestr', (message, position) => {
   const msg = message.trim();
+  console.log(msg);
 
   // 如果是 BOT 自己的名字出現在發言者位置，直接忽略
-  if (msg.startsWith(config.BOT_OPTIONS.username)) return;
+  if (msg.startsWith("[您 ->")) return;
 
   if (isTeleportRequest(msg)) {
     bot.chat('/tpaccept');
@@ -55,7 +56,7 @@ bot.on('messagestr', (message, position) => {
         return;
       }
 
-      bot.chat(`/m ${config.MY_MASTER_ID} 收到 go，切換到狀態機模式開始工作。`);
+      bot.chat(`/m ${config.MY_MASTER_ID} 收到，準備開始挖土。`);
       console.log('🚀 [指令] 啟動狀態機主循環。');
       fsm.startLoop(bot);
       return;
@@ -68,14 +69,14 @@ bot.on('messagestr', (message, position) => {
       }
 
       fsm.requestStorage();
-      bot.chat(`/m ${config.MY_MASTER_ID} 收到 storage，已加入狀態機佇列。`);
+      bot.chat(`/m ${config.MY_MASTER_ID} 收到，準備儲存物品。`);
       return;
     }
 
     // 3. 停止狀態機循環
     if (lowerMsg.includes('stop')) {
       fsm.stopLoop();
-      bot.chat(`/m ${config.MY_MASTER_ID} 收到 stop，已停止狀態機。`);
+      bot.chat(`/m ${config.MY_MASTER_ID} 收到，已停止工作。`);
     }
   }
 });

@@ -28,6 +28,40 @@ function getAdjacentPositions(pos) {
     ];
 }
 
+function buildChestNavigationTargets(bot, chestBlock) {
+    const chestPos = chestBlock.position;
+    const origin = bot.entity && bot.entity.position
+        ? bot.entity.position
+        : chestPos;
+
+    const botLevelY = Math.floor(origin.y);
+    const candidates = [
+        { x: chestPos.x + 1, y: botLevelY, z: chestPos.z },
+        { x: chestPos.x - 1, y: botLevelY, z: chestPos.z },
+        { x: chestPos.x, y: botLevelY, z: chestPos.z + 1 },
+        { x: chestPos.x, y: botLevelY, z: chestPos.z - 1 },
+        { x: chestPos.x + 1, y: botLevelY, z: chestPos.z + 1 },
+        { x: chestPos.x - 1, y: botLevelY, z: chestPos.z - 1 }
+    ];
+
+    candidates.sort((a, b) => {
+        const distA = Math.abs(a.x - origin.x) + Math.abs(a.y - origin.y) + Math.abs(a.z - origin.z);
+        const distB = Math.abs(b.x - origin.x) + Math.abs(b.y - origin.y) + Math.abs(b.z - origin.z);
+        return distA - distB;
+    });
+
+    return candidates;
+}
+
+function buildChestNavigationGoal(bot, chestBlock) {
+    const [target] = buildChestNavigationTargets(bot, chestBlock);
+    if (!target) {
+        return null;
+    }
+
+    return new goals.GoalNear(target.x, target.y, target.z, 1);
+}
+
 // 由告示牌座標找六個相鄰方塊中的箱子。
 function findAdjacentChest(bot, pos) {
     const directions = getAdjacentPositions(pos);
@@ -82,11 +116,33 @@ async function storeAllItemsToSignChest(bot, keyword = '倉儲區') {
             return;
         }
 
-        // 4. 走向該箱子並打開它
+        // 4. 先嘗試走到箱子旁邊；若導航失敗就直接嘗試開箱
         console.log(`🚶 [儲存] 正在走向指定的箱子...`);
-        await bot.pathfinder.goto(new goals.GoalGetToBlock(targetChestBlock.position.x, targetChestBlock.position.y, targetChestBlock.position.z));
+        const navTargets = buildChestNavigationTargets(bot, targetChestBlock);
+        let chest = null;
 
-        const chest = await bot.openChest(targetChestBlock);
+        for (const target of navTargets) {
+            try {
+                bot.pathfinder.stop();
+                await bot.pathfinder.goto(new goals.GoalNear(target.x, target.y, target.z, 1));
+                chest = await bot.openChest(targetChestBlock);
+                break;
+            } catch (navErr) {
+                console.log(`⚠️ [儲存] 導航到 ${target.x},${target.y},${target.z} 失敗：`, navErr && navErr.message ? navErr.message : navErr);
+            }
+        }
+
+        if (!chest) {
+            console.log(`⚠️ [儲存] 導航全部失敗，直接嘗試開箱...`);
+            try {
+                chest = await bot.openChest(targetChestBlock);
+            } catch (openErr) {
+                console.log(`❌ [儲存] 無法開啟箱子：`, openErr && openErr.message ? openErr.message : openErr);
+                bot.chat(`/m ${MY_MASTER_ID} ❌ 無法靠近或開啟儲物箱。`);
+                return;
+            }
+        }
+
         console.log(`📦 [儲存] 箱子已打開，開始存放身上所有物品...`);
 
         const itemsToDeposit = bot.inventory.items();
@@ -124,4 +180,4 @@ async function storeAllItemsToSignChest(bot, keyword = '倉儲區') {
     }
 }
 
-module.exports = { storeAllItemsToSignChest };
+module.exports = { storeAllItemsToSignChest, buildChestNavigationGoal, buildChestNavigationTargets };
