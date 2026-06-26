@@ -137,6 +137,7 @@ function installHealthDamageSensor(bot) {
         const currentHealth = bot.health || LOOP_CONFIG.defaultHealth;
         if (currentHealth < state.lastHealth) {
             state.damageDetected = true;
+            console.log(`⚠️ [FSM] 受傷偵測！血量: ${state.lastHealth} -> ${currentHealth}`);
         }
 
         state.lastHealth = currentHealth;
@@ -163,6 +164,7 @@ function pickRuleByPriority(bot) {
     for (const rule of sortedRules) {
         try {
             if (rule.condition(bot)) {
+                console.log(`  ✓ [Rule] ${rule.name} 符合條件 (優先度: ${rule.priority})`);
                 return rule;
             }
         } catch (err) {
@@ -174,6 +176,7 @@ function pickRuleByPriority(bot) {
 
 async function runEscape(bot) {
     // 逃跑統一策略：立即 /rtp，並清掉威脅相關旗標。
+    console.log(`🏃 [Action] 逃跑中...`);
     bot.pathfinder.stop();
     bot.chat(RTP_COMMAND);
     await sleep(LOOP_CONFIG.teleportWaitMs);
@@ -181,27 +184,33 @@ async function runEscape(bot) {
     state.damageDetected = false;
     state.enemyDetected = false;
     state.collectErrorCount = 0;
+    console.log(`✅ [Action] 逃跑完成，已隨機傳送`);
 }
 
 async function runEat(bot) {
+    console.log(`🍖 [Action] 開始吃肉（飢餓度: ${bot.food})`);
     const steak = bot.inventory.items().find((item) => item.name === 'cooked_beef');
     if (!steak) {
+        console.log(`⚠️ [Action] 找不到烤牛肉！`);
         return;
     }
 
     bot.pathfinder.stop();
     await bot.equip(steak, 'hand');
     await bot.consume();
+    console.log(`✅ [Action] 吃完了（飢餓度: ${bot.food})`);
 }
 
 async function runManualStorage(bot) {
     // 手動存倉完成後會重置到非野外，讓流程重新走補給/出發判斷。
+    console.log(`💾 [Action] 手動存倉中...`);
     bot.chat(WARP_BASE_COMMAND);
     await sleep(LOOP_CONFIG.teleportWaitMs);
     await storage.storeAllItemsToSignChest(bot, '倉儲區');
 
     const ok = await supplies.checkAndSupply(bot);
     if (!ok) {
+        console.log(`❌ [Action] 補給失敗，停止循環`);
         state.pendingStorage = false;
         stopLoop();
         return;
@@ -209,43 +218,53 @@ async function runManualStorage(bot) {
 
     state.pendingStorage = false;
     state.isInWild = false;
+    console.log(`✅ [Action] 存倉完成`);
 }
 
 async function runSupply(bot) {
+    console.log(`📦 [Action] 補給中...`);
     const ready = await supplies.checkAndSupply(bot);
     if (!ready) {
+        console.log(`❌ [Action] 補給失敗，停止循環`);
         stopLoop();
         return;
     }
 
     state.isInWild = false;
+    console.log(`✅ [Action] 補給完成`);
 }
 
 async function runInventoryStorage(bot) {
+    console.log(`🏠 [Action] 背包滿，回倉存物中...`);
     bot.chat(WARP_BASE_COMMAND);
     await sleep(LOOP_CONFIG.teleportWaitMs);
     await storage.storeAllItemsToSignChest(bot, '倉儲區');
 
     const ready = await supplies.checkAndSupply(bot);
     if (!ready) {
+        console.log(`❌ [Action] 倉儲補給失敗，停止循環`);
         stopLoop();
         return;
     }
 
     state.isInWild = false;
     state.collectErrorCount = 0;
+    console.log(`✅ [Action] 倉儲完成，重新出發`);
 }
 
 async function runEnsureWild(bot) {
+    console.log(`🌍 [Action] 前往野外中...`);
     bot.pathfinder.stop();
     bot.chat(RTP_COMMAND);
     await sleep(LOOP_CONFIG.teleportWaitMs);
     state.isInWild = true;
     state.collectErrorCount = 0;
+    console.log(`✅ [Action] 已到達野外`);
 }
 
 async function runMine(bot) {
     // 採礦細節委派給 mining 模組，FSM 只負責調度。
+    console.log(`⛏️ [Action] 採礦中...`);
     await mining.runMineStep(bot, {
         mcData: state.mcData,
         loopConfig: mining.MINING_CONFIG,
@@ -262,6 +281,9 @@ async function tickStateMachine(bot) {
 
     try {
         state.enemyDetected = detectNearbyHostile(bot);
+        if (state.enemyDetected) {
+            console.log(`⚠️ [Detect] 周邊偵測到敵對生物！`);
+        }
 
         // 透過 Rule Engine 選優先序最高的規則
         const rule = pickRuleByPriority(bot);
@@ -272,7 +294,7 @@ async function tickStateMachine(bot) {
         }
 
         if (state.currentState !== rule.name) {
-            console.log(`[FSM] ${state.currentState} -> ${rule.name}`);
+            console.log(`\n🔄 [FSM] ${state.currentState} -> ${rule.name}`);
         }
 
         state.currentState = rule.name;
@@ -290,9 +312,11 @@ function requestStorage() {
 
 function startLoop(bot) {
     if (state.isLoopRunning && state.tickTimer) {
+        console.log(`⚠️ [FSM] 已在運行中，忽略重複啟動`);
         return;
     }
 
+    console.log(`\n🎬 [FSM] === 開始主循環 ===`);
     state.isLoopRunning = true;
     state.pendingStorage = false;
     state.isInWild = false;
@@ -304,9 +328,11 @@ function startLoop(bot) {
 
     // Rule Engine 初始化：預先排序一次，避免每 tick 都重排。
     sortedRules = [...rules].sort((a, b) => b.priority - a.priority);
+    console.log(`📋 [FSM] 規則已排序: ${sortedRules.map(r => `${r.name}(${r.priority})`).join(' -> ')}`);
 
     // 血量監聽採單次安裝，避免重複綁定造成多次觸發。
     installHealthDamageSensor(bot);
+    console.log(`💓 [FSM] 血量監聽已安裝`);
 
     state.tickTimer = setInterval(() => {
         tickStateMachine(bot);
@@ -317,6 +343,7 @@ function startLoop(bot) {
 
 function stopLoop() {
     // stop 只做狀態重置與計時器清理，不移除事件監聽。
+    console.log(`\n🛑 [FSM] === 停止主循環 ===`);
     state.isLoopRunning = false;
     state.isTicking = false;
     state.pendingStorage = false;
@@ -328,6 +355,7 @@ function stopLoop() {
         clearInterval(state.tickTimer);
         state.tickTimer = null;
     }
+    console.log(`✅ [FSM] 已清理循環`);
 }
 
 module.exports = {
