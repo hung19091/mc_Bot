@@ -1,6 +1,7 @@
 const storage = require('./storage');
 const supplies = require('./supplies');
 const mining = require('./mining');
+const { goals } = require('mineflayer-pathfinder');
 
 // FSM 協調層參數：只放與狀態決策相關的常數。
 const LOOP_CONFIG = {
@@ -9,7 +10,10 @@ const LOOP_CONFIG = {
     hungryThreshold: 15,
     steakMinToStart: 20,
     defaultHealth: 20,
-    damageSourceCheckRadius: 4
+    damageSourceCheckRadius: 4,
+    miningIdleWarningMs: 5000,
+    miningIdleRtpMs: 20000,
+    miningStuckCheckRadius: 1.5
 };
 
 const WARP_BASE_COMMAND = '/warp HIRO_QQX_2';
@@ -45,7 +49,10 @@ const state = {
     enemyDetected: false,
     healthListenerInstalled: false,
     lastHealth: LOOP_CONFIG.defaultHealth,
-    currentState: FSM_STATE.Idle
+    currentState: FSM_STATE.Idle,
+    miningLastPosition: null,
+    miningIdleSince: null,
+    miningIdleWarningShown: false
 };
 
 // Rule Engine：優先權表驅動決策。排序一次在 startLoop，避免每 tick 重排。
@@ -56,6 +63,12 @@ const rules = [
         name: FSM_STATE.Escape,
         priority: 100,
         condition: () => hasThreat(),
+        action: runEscape
+    },
+    {
+        name: FSM_STATE.Escape,
+        priority: 95,
+        condition: (bot) => shouldRtpForMiningStuck(bot),
         action: runEscape
     },
     {
@@ -155,6 +168,101 @@ function hasThreat() {
     return state.damageDetected;
 }
 
+function resetPathfinderState(bot) {
+    if (!bot || !bot.pathfinder) {
+        return;
+    }
+
+    try {
+        bot.pathfinder.stop();
+    } catch (e) { }
+
+    try {
+        bot.pathfinder.setGoal(null);
+    } catch (e) { }
+
+    try {
+        if (bot.pathfinder.currentGoal) {
+            bot.pathfinder.currentGoal = null;
+        }
+    } catch (e) { }
+
+    try {
+        if (bot.pathfinder.goal) {
+            bot.pathfinder.goal = null;
+        }
+    } catch (e) { }
+
+    try {
+        if (bot.pathfinder.path) {
+            bot.pathfinder.path = null;
+        }
+    } catch (e) { }
+}
+
+async function enterMiningAfterEscape(bot) {
+    state.currentState = FSM_STATE.Mine;
+    await mining.runMineStep(bot, {
+        mcData: state.mcData,
+        loopConfig: mining.MINING_CONFIG,
+        state
+    });
+}
+
+function resetMiningIdleState() {
+    state.miningLastPosition = null;
+    state.miningIdleSince = null;
+    state.miningIdleWarningShown = false;
+}
+
+function shouldRtpForMiningStuck(bot) {
+    if (!state.isLoopRunning || !state.isInWild || state.currentState !== FSM_STATE.Mine || !bot.entity || !bot.entity.position) {
+        return false;
+    }
+
+    const currentPos = bot.entity.position;
+
+    // 1. 初始化基準點
+    if (!state.miningLastPosition) {
+        state.miningLastPosition = { x: currentPos.x, y: currentPos.y, z: currentPos.z };
+        state.miningIdleSince = Date.now();
+        state.miningIdleWarningShown = false;
+        return false;
+    }
+
+    // 2. 計算目前位置與「上次紀錄的發呆基準點」的歐幾里得距離
+    const dx = currentPos.x - state.miningLastPosition.x;
+    const dy = currentPos.y - state.miningLastPosition.y;
+    const dz = currentPos.z - state.miningLastPosition.z;
+    const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+    // 3. 判定是否還卡在原地 (移動範圍小於 2.0 格都算卡住)
+    const isStuck = distance < 2.0;
+
+    if (!isStuck) {
+        // 只有當 bot 真的大範圍移動了（代表有認真在挖並前進），才更新基準點與重置計時器
+        state.miningLastPosition = { x: currentPos.x, y: currentPos.y, z: currentPos.z };
+        state.miningIdleSince = Date.now();
+        state.miningIdleWarningShown = false;
+        return false;
+    }
+
+    // 4. 計算卡住的時間
+    const idleMs = Date.now() - state.miningIdleSince;
+    if (idleMs >= LOOP_CONFIG.miningIdleRtpMs) {
+        console.log(`⚠️ [FSM] 採礦發呆超過 ${LOOP_CONFIG.miningIdleRtpMs / 1000} 秒，執行 /rtp。`);
+        resetMiningIdleState();
+        return true;
+    }
+
+    if (!state.miningIdleWarningShown && idleMs >= LOOP_CONFIG.miningIdleWarningMs) {
+        state.miningIdleWarningShown = true;
+        console.log(`⚠️ [FSM] 採礦發呆超過 ${LOOP_CONFIG.miningIdleWarningMs / 1000} 秒，請注意。`);
+    }
+
+    return false;
+}
+
 function shouldEat(bot) {
     return bot.food <= LOOP_CONFIG.hungryThreshold && mining.hasItem(bot, 'cooked_beef', 1);
 }
@@ -182,16 +290,61 @@ function pickRuleByPriority(bot) {
 }
 
 async function runEscape(bot) {
-    // 逃跑統一策略：立即 /rtp，並清掉威脅相關旗標。
-    console.log(`🏃 [Action] 逃跑中...`);
-    bot.pathfinder.stop();
+    console.log(`🏃 [Action] 偵測到危機或卡死，準備執行 /rtp...`);
+
+    // 1. 強力清理底層所有可能殘留的異步任務與計時器
+    try {
+        // 中斷尋路
+        resetPathfinderState(bot);
+
+        // 中斷挖掘
+        if (typeof bot.stopDigging === 'function') {
+            bot.stopDigging();
+        }
+
+        // 清空當前目標方塊與挖掘狀態
+        bot.targetBlock = null;
+        bot.isDigging = false;
+
+        // 核心修正：強制清理 collectBlock 的內部狀態
+        if (bot.collectBlock) {
+            // 很多版本的 collectBlock 在中斷時不會自動釋放「正在採集中」的鎖定（Lock）
+            // 這裡直接將內部行為標記為結束，強制解鎖
+            if (bot.collectBlock.customEvents) {
+                bot.collectBlock.customEvents.removeAllListeners();
+            }
+            // 重置可能殘留的對象
+            bot.collectBlock.targets = [];
+            bot.collectBlock.currentTarget = null;
+        }
+    } catch (e) {
+        console.log(`⚠️ [FSM] 清理底層動作時發生微小錯誤，忽略並繼續:`, e.message);
+    }
+
+    // 2. 執行隨機傳送
     bot.chat(RTP_COMMAND);
+    console.log(`⏳ [Action] 已發送 /rtp，等待傳送緩衝 ${LOOP_CONFIG.teleportWaitMs / 1000} 秒...`);
     await sleep(LOOP_CONFIG.teleportWaitMs);
+
+    // 3. 傳送完成後，務必重新整理周圍方塊快取與視線
+    try {
+        bot.clearControlStates(); // 重置所有按鍵狀態（前進、後退、挖等），防止傳送後 bot 還在按著某個鍵
+        await bot.waitForChunksToLoad(); // ⏳ 關鍵：等待新地點的區塊載入完畢，否則 findBlocks 會找不到任何泥土
+    } catch (e) {
+        console.log(`⚠️ [FSM] 區塊載入等待超時，直接開始採礦`);
+    }
+
+    // 4. 重置 FSM 所有狀態旗標
     state.isInWild = true;
     state.damageDetected = false;
     state.enemyDetected = false;
     state.collectErrorCount = 0;
-    console.log(`✅ [Action] 逃跑完成，已隨機傳送`);
+
+    resetMiningIdleState(); // 重新開始計算新地點的發呆時間
+    state.currentState = FSM_STATE.Mine;
+    await enterMiningAfterEscape(bot);
+
+    console.log(`✅ [Action] 隨機傳送完畢且底層重置成功，開始在新地點採礦！`);
 }
 
 async function runEat(bot) {
@@ -271,12 +424,40 @@ async function runEnsureWild(bot) {
 
 async function runMine(bot) {
     // 採礦細節委派給 mining 模組，FSM 只負責調度。
+    if (!bot.entity || !bot.entity.position) {
+        console.log('⚠️ [FSM] 採礦前沒有有效的 bot 位置，跳過。');
+        return;
+    }
+
+    const before = {
+        position: { ...bot.entity.position },
+        digging: Boolean(bot.isDigging),
+        target: bot.targetBlock ? bot.targetBlock.position : null
+    };
+
     console.log(`⛏️ [Action] 採礦中...`);
     await mining.runMineStep(bot, {
         mcData: state.mcData,
         loopConfig: mining.MINING_CONFIG,
         state
     });
+
+    const after = {
+        position: bot.entity ? { ...bot.entity.position } : null,
+        digging: Boolean(bot.isDigging),
+        target: bot.targetBlock ? bot.targetBlock.position : null
+    };
+
+    const moved = after.position && before.position && (
+        Math.abs(after.position.x - before.position.x) > 0.01 ||
+        Math.abs(after.position.y - before.position.y) > 0.01 ||
+        Math.abs(after.position.z - before.position.z) > 0.01
+    );
+
+    const actuallyMining = Boolean(after.digging || after.target || moved);
+    if (!actuallyMining) {
+        //console.log('⚠️ [FSM] 採礦入口判定：本次 tick 內沒有任何有效挖掘活動，可能已經卡在原地。');
+    }
 }
 
 async function tickStateMachine(bot) {
@@ -326,6 +507,7 @@ function startLoop(bot) {
     state.damageDetected = false;
     state.enemyDetected = false;
     state.currentState = FSM_STATE.Idle;
+    resetMiningIdleState();
     state.mcData = require('minecraft-data')(bot.version);
 
     // Rule Engine 初始化：預先排序一次，避免每 tick 都重排。
@@ -352,6 +534,7 @@ function stopLoop() {
     state.enemyDetected = false;
     state.damageDetected = false;
     state.currentState = FSM_STATE.Idle;
+    resetMiningIdleState();
 
     if (state.tickTimer) {
         clearInterval(state.tickTimer);
@@ -364,5 +547,7 @@ module.exports = {
     state,
     startLoop,
     stopLoop,
-    requestStorage
+    requestStorage,
+    shouldRtpForMiningStuck,
+    runEscape
 };

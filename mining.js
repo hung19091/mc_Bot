@@ -10,7 +10,8 @@ const MINING_CONFIG = {
     yDiffLower: -2.5,
     collectChestRadius: 3,
     collectItemRadius: 3,
-    maxCollectErrorsBeforeRtp: 8
+    maxCollectErrorsBeforeRtp: 8,
+    collectTimeoutMs: 15000 // ⏱️ 新增：單次挖掘任務最多執行 15 秒，超過就強制中斷
 };
 
 // 供 FSM 與採礦流程共用的物品判斷工具。
@@ -21,7 +22,24 @@ function hasItem(bot, keyword, minCount = 1) {
 }
 
 function collectNearbyDirtTargets(bot, mcData, cfg) {
-    // 只挑選合理高度差的目標，降低路徑失敗與卡地形機率。
+    if (!bot.entity || !bot.entity.position) {
+        return [];
+    }
+
+    if (bot.targetBlock && bot.targetBlock.position) {
+        const targetPos = bot.targetBlock.position;
+        const currentPos = bot.entity.position;
+        const distance = Math.sqrt(
+            (targetPos.x - currentPos.x) ** 2 +
+            (targetPos.y - currentPos.y) ** 2 +
+            (targetPos.z - currentPos.z) ** 2
+        );
+
+        if (distance > cfg.nearbySearchDistance + 4) {
+            bot.targetBlock = null;
+        }
+    }
+
     const allDirtPositions = bot.findBlocks({
         matching: mcData.blocksByName.dirt.id,
         maxDistance: cfg.nearbySearchDistance,
@@ -63,25 +81,48 @@ async function runMineStep(bot, runtime) {
 
     try {
         await equipShovelIfNeeded(bot);
-        await bot.collectBlock.collect(targets, {
-            ignoreFrame: true,
-            count: targets.length,
-            chestRadius: cfg.collectChestRadius,
-            itemRadius: cfg.collectItemRadius
-        });
+
+        // ⏱️ 核心改動：建立一個超時 Promise
+        const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('MiningTimeout')), cfg.collectTimeoutMs || 15000)
+        );
+
+        // 使用 Promise.race，只要 collect 逾時或報錯，任何一個先發生就結束
+        await Promise.race([
+            bot.collectBlock.collect(targets, {
+                ignoreFrame: true,
+                count: targets.length,
+                chestRadius: cfg.collectChestRadius,
+                itemRadius: cfg.collectItemRadius
+            }),
+            timeoutPromise
+        ]);
 
         runtime.state.collectErrorCount = 0;
     } catch (err) {
-        // 工具遺失時交回 FSM 後勤分支處理，不在採礦層硬補。
+        console.log('⚠️ [FSM] 發生錯誤。err.message:', err.message);
+        // 🚨 發生錯誤或超時，必須立即清理 bot 當前的動作，避免底層行為繼續殘留
+        try {
+            bot.pathfinder.stop();
+            if (typeof bot.stopDigging === 'function') bot.stopDigging();
+        } catch (e) { }
+
+        if (err.message === 'MiningTimeout') {
+            console.log(`⏳ [Mine] 採集超時 (${(cfg.collectTimeoutMs || 15000) / 1000}秒)，強制釋放控制權給 FSM。`);
+            // 超時不算嚴重錯誤，交給 FSM 的 20秒 發呆判定去決定要不要 RTP
+            return;
+        }
+
+        // 工具遺失時交回 FSM 後勤分支處理
         const hasShovelNow = hasItem(bot, 'shovel', 1);
         if (!hasShovelNow) {
+            console.log('⚠️ [FSM] 工具遺失。');
             runtime.state.isInWild = false;
             return;
         }
 
         runtime.state.collectErrorCount += 1;
         if (runtime.state.collectErrorCount >= cfg.maxCollectErrorsBeforeRtp) {
-            // 多次採集異常時，標記離開野外讓 FSM 重新 /rtp 轉點。
             console.log('⚠️ [FSM] 連續採集異常，切換到新地點 /rtp。');
             runtime.state.isInWild = false;
             runtime.state.collectErrorCount = 0;
