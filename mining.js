@@ -99,7 +99,7 @@ function clearMiningRuntimeState(bot) {
     } catch (e) { }
 }
 
-async function mineSingleTarget(bot, block, cfg) {
+async function mineSingleTarget(bot, block, cfg, runtime) {
     if (!block || !block.position) {
         return { status: 'invalid' };
     }
@@ -162,6 +162,9 @@ async function mineSingleTarget(bot, block, cfg) {
         ]);
 
         console.log(`[Mine] 方塊挖掘完成 ${blockSummary}`);
+        if (runtime && runtime.state && typeof runtime.state.markMiningProgress === 'function') {
+            runtime.state.markMiningProgress(bot);
+        }
         return { status: 'success' };
     } catch (err) {
         const errorMessage = err && err.message ? err.message : String(err);
@@ -182,8 +185,8 @@ async function runMineStep(bot, runtime) {
     console.log(`[Mine] runMineStep start: targetCount=${targets.length}, position=${position}`);
 
     if (targets.length === 0) {
-        clearMiningRuntimeState(bot);
-        await sleep(cfg.noTargetSleepMs);
+        console.log('⚠️ [FSM] 區塊內泥土已挖完，/rtp至新地點。');
+        runtime.state.isInWild = false;
         return;
     }
 
@@ -193,7 +196,7 @@ async function runMineStep(bot, runtime) {
         console.log(`[Mine] 開始手動挖掘: timeout=${timeoutMs}ms, targets=${targets.length}, firstTargets=${targetSummary}`);
 
         for (const target of targets) {
-            const result = await mineSingleTarget(bot, target, cfg);
+            const result = await mineSingleTarget(bot, target, cfg, runtime);
             if (result.status === 'success') {
                 runtime.state.collectErrorCount = 0;
                 return;

@@ -56,6 +56,29 @@ test('runEscape immediately re-enters mining after teleport', async () => {
     }
 });
 
+test('mining progress resets the idle timer', () => {
+    fsm.state.isLoopRunning = true;
+    fsm.state.isInWild = true;
+    fsm.state.currentState = 'Mine';
+    fsm.state.miningLastPosition = { x: 10, y: 64, z: 20 };
+    fsm.state.miningIdleSince = Date.now() - 1000;
+    fsm.state.miningIdleWarningShown = true;
+
+    const bot = {
+        entity: {
+            position: { x: 10, y: 64, z: 20 }
+        }
+    };
+
+    fsm.markMiningProgress(bot);
+
+    assert.equal(fsm.state.miningLastPosition.x, 10);
+    assert.equal(fsm.state.miningLastPosition.y, 64);
+    assert.equal(fsm.state.miningLastPosition.z, 20);
+    assert.ok(Date.now() - fsm.state.miningIdleSince < 1000);
+    assert.equal(fsm.state.miningIdleWarningShown, false);
+});
+
 test('runMineStep clears stale collectBlock state after timeout', async () => {
     const targets = {
         clear() { },

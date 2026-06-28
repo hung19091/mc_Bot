@@ -205,7 +205,10 @@ async function enterMiningAfterEscape(bot) {
     await mining.runMineStep(bot, {
         mcData: state.mcData,
         loopConfig: mining.MINING_CONFIG,
-        state
+        state: {
+            ...state,
+            markMiningProgress: () => markMiningProgress(bot)
+        }
     });
 }
 
@@ -215,12 +218,27 @@ function resetMiningIdleState() {
     state.miningIdleWarningShown = false;
 }
 
+function markMiningProgress(bot) {
+    if (!state.isLoopRunning || !state.isInWild || state.currentState !== FSM_STATE.Mine || !bot || !bot.entity || !bot.entity.position) {
+        return;
+    }
+
+    state.miningLastPosition = {
+        x: bot.entity.position.x,
+        y: bot.entity.position.y,
+        z: bot.entity.position.z
+    };
+    state.miningIdleSince = Date.now();
+    state.miningIdleWarningShown = false;
+}
+
 function shouldRtpForMiningStuck(bot) {
     if (!state.isLoopRunning || !state.isInWild || state.currentState !== FSM_STATE.Mine || !bot.entity || !bot.entity.position) {
         return false;
     }
 
     const currentPos = bot.entity.position;
+
 
     // 1. 初始化基準點
     if (!state.miningLastPosition) {
@@ -439,7 +457,10 @@ async function runMine(bot) {
     await mining.runMineStep(bot, {
         mcData: state.mcData,
         loopConfig: mining.MINING_CONFIG,
-        state
+        state: {
+            ...state,
+            markMiningProgress: () => markMiningProgress(bot)
+        }
     });
 
     const after = {
@@ -549,5 +570,6 @@ module.exports = {
     stopLoop,
     requestStorage,
     shouldRtpForMiningStuck,
-    runEscape
+    runEscape,
+    markMiningProgress
 };
