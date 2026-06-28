@@ -151,13 +151,18 @@ function installHealthDamageSensor(bot) {
 
         const currentHealth = bot.health || LOOP_CONFIG.defaultHealth;
         if (currentHealth < state.lastHealth) {
+            /*
             const hitByHostileMob = wasDamagedByHostileMob(bot);
+            
             if (hitByHostileMob) {
                 state.damageDetected = true;
                 console.log(`⚠️ [FSM] 受傷且來源為 hostile mob！血量: ${state.lastHealth} -> ${currentHealth}`);
             } else {
                 console.log(`ℹ️ [FSM] 受傷但非 hostile mob 來源，忽略 RTP。血量: ${state.lastHealth} -> ${currentHealth}`);
             }
+            */
+
+            state.damageDetected = true;
         }
 
         state.lastHealth = currentHealth;
