@@ -1,4 +1,5 @@
 // 採礦模組：只負責挖掘流程與相關工具函式，不承擔 FSM 入口。
+const { goals } = require('mineflayer-pathfinder');
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const MINING_CONFIG = {
@@ -70,55 +71,145 @@ async function equipShovelIfNeeded(bot) {
     }
 }
 
+function clearMiningRuntimeState(bot) {
+    try {
+        if (bot) {
+            bot.targetBlock = null;
+            bot.isDigging = false;
+            if (typeof bot.stopDigging === 'function') {
+                bot.stopDigging();
+            }
+            if (bot.pathfinder && typeof bot.pathfinder.stop === 'function') {
+                bot.pathfinder.stop();
+            }
+        }
+    } catch (e) { }
+
+    try {
+        if (bot && bot.collectBlock) {
+            if (bot.collectBlock.customEvents && typeof bot.collectBlock.customEvents.removeAllListeners === 'function') {
+                bot.collectBlock.customEvents.removeAllListeners();
+            }
+            if (bot.collectBlock.targets && typeof bot.collectBlock.targets.clear === 'function') {
+                bot.collectBlock.targets.clear();
+            }
+            bot.collectBlock.currentTarget = null;
+            bot.collectBlock.collecting = false;
+        }
+    } catch (e) { }
+}
+
+async function mineSingleTarget(bot, block, cfg) {
+    if (!block || !block.position) {
+        return { status: 'invalid' };
+    }
+
+    const pos = block.position;
+    const blockSummary = `${pos.x},${pos.y},${pos.z}`;
+    console.log(`[Mine] 準備挖方塊 ${blockSummary}`);
+
+    bot.targetBlock = block;
+
+    try {
+        await equipShovelIfNeeded(bot);
+
+        if (bot.pathfinder && typeof bot.pathfinder.stop === 'function') {
+            try {
+                bot.pathfinder.stop();
+            } catch (e) { }
+        }
+
+        if (bot.pathfinder && typeof bot.pathfinder.setGoal === 'function') {
+            try {
+                bot.pathfinder.setGoal(null);
+            } catch (e) { }
+        }
+
+        const hasShovelNow = hasItem(bot, 'shovel', 1);
+        if (!hasShovelNow) {
+            console.log('[Mine] 沒有工具，停止挖掘。');
+            return { status: 'no_shovel' };
+        }
+
+        if (!bot.pathfinder || typeof bot.pathfinder.goto !== 'function') {
+            console.log('[Mine] pathfinder 不可用，停止挖掘。');
+            return { status: 'pathfinder_unavailable' };
+        }
+
+        const pathTimeoutMs = Math.min(cfg.collectTimeoutMs || 15000, 5000);
+        console.log(`[Mine] 開始尋路到方塊 ${blockSummary}，timeout=${pathTimeoutMs}ms`);
+
+        try {
+            await Promise.race([
+                bot.pathfinder.goto(new goals.GoalLookAtBlock(block.position, bot.world)),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('PathTimeout')), pathTimeoutMs))
+            ]);
+        } catch (err) {
+            const errorMessage = err && err.message ? err.message : String(err);
+            if (errorMessage.includes('stopped') || errorMessage.includes('stop')) {
+                console.log(`[Mine] 尋路被中斷: ${errorMessage}`);
+                return { status: 'path_stopped', error: errorMessage };
+            }
+            throw err;
+        }
+
+        console.log(`[Mine] 到達方塊 ${blockSummary}，開始 dig`);
+
+        const digTimeoutMs = Math.min(cfg.collectTimeoutMs || 15000, 5000);
+        await Promise.race([
+            bot.dig(block),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('DigTimeout')), digTimeoutMs))
+        ]);
+
+        console.log(`[Mine] 方塊挖掘完成 ${blockSummary}`);
+        return { status: 'success' };
+    } catch (err) {
+        const errorMessage = err && err.message ? err.message : String(err);
+        console.log(`[Mine] 挖方塊失敗: ${errorMessage}`);
+        return { status: 'failed', error: errorMessage };
+    } finally {
+        clearMiningRuntimeState(bot);
+    }
+}
+
 async function runMineStep(bot, runtime) {
     const cfg = runtime.loopConfig || MINING_CONFIG;
     const targets = collectNearbyDirtTargets(bot, runtime.mcData, cfg);
+    const position = bot.entity && bot.entity.position
+        ? `${bot.entity.position.x.toFixed(1)},${bot.entity.position.y.toFixed(1)},${bot.entity.position.z.toFixed(1)}`
+        : 'unknown';
+
+    console.log(`[Mine] runMineStep start: targetCount=${targets.length}, position=${position}`);
 
     if (targets.length === 0) {
+        clearMiningRuntimeState(bot);
         await sleep(cfg.noTargetSleepMs);
         return;
     }
 
     try {
-        await equipShovelIfNeeded(bot);
+        const timeoutMs = cfg.collectTimeoutMs || 15000;
+        const targetSummary = targets.slice(0, 3).map((target) => target && target.position ? `${target.position.x},${target.position.y},${target.position.z}` : 'unknown').join(' | ');
+        console.log(`[Mine] 開始手動挖掘: timeout=${timeoutMs}ms, targets=${targets.length}, firstTargets=${targetSummary}`);
 
-        // ⏱️ 核心改動：建立一個超時 Promise
-        const timeoutPromise = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('MiningTimeout')), cfg.collectTimeoutMs || 15000)
-        );
+        for (const target of targets) {
+            const result = await mineSingleTarget(bot, target, cfg);
+            if (result.status === 'success') {
+                runtime.state.collectErrorCount = 0;
+                return;
+            }
 
-        // 使用 Promise.race，只要 collect 逾時或報錯，任何一個先發生就結束
-        await Promise.race([
-            bot.collectBlock.collect(targets, {
-                ignoreFrame: true,
-                count: targets.length,
-                chestRadius: cfg.collectChestRadius,
-                itemRadius: cfg.collectItemRadius
-            }),
-            timeoutPromise
-        ]);
+            if (result.status === 'no_shovel') {
+                console.log('⚠️ [FSM] 工具遺失。');
+                runtime.state.isInWild = false;
+                return;
+            }
 
-        runtime.state.collectErrorCount = 0;
-    } catch (err) {
-        console.log('⚠️ [FSM] 發生錯誤。err.message:', err.message);
-        // 🚨 發生錯誤或超時，必須立即清理 bot 當前的動作，避免底層行為繼續殘留
-        try {
-            bot.pathfinder.stop();
-            if (typeof bot.stopDigging === 'function') bot.stopDigging();
-        } catch (e) { }
-
-        if (err.message === 'MiningTimeout') {
-            console.log(`⏳ [Mine] 採集超時 (${(cfg.collectTimeoutMs || 15000) / 1000}秒)，強制釋放控制權給 FSM。`);
-            // 超時不算嚴重錯誤，交給 FSM 的 20秒 發呆判定去決定要不要 RTP
-            return;
-        }
-
-        // 工具遺失時交回 FSM 後勤分支處理
-        const hasShovelNow = hasItem(bot, 'shovel', 1);
-        if (!hasShovelNow) {
-            console.log('⚠️ [FSM] 工具遺失。');
-            runtime.state.isInWild = false;
-            return;
+            if (result.status === 'pathfinder_unavailable') {
+                console.log('⚠️ [Mine] pathfinder 不可用，停止本輪。');
+                runtime.state.isInWild = false;
+                return;
+            }
         }
 
         runtime.state.collectErrorCount += 1;
@@ -126,6 +217,14 @@ async function runMineStep(bot, runtime) {
             console.log('⚠️ [FSM] 連續採集異常，切換到新地點 /rtp。');
             runtime.state.isInWild = false;
             runtime.state.collectErrorCount = 0;
+        }
+    } catch (err) {
+        const errorMessage = err && err.message ? err.message : String(err);
+        console.log(`[Mine] runMineStep catch，error=`, errorMessage);
+        clearMiningRuntimeState(bot);
+        if (errorMessage === 'MiningTimeout') {
+            console.log(`⏳ [Mine] 採集超時 (${(cfg.collectTimeoutMs || 15000) / 1000}秒)，強制釋放控制權給 FSM。`);
+            return;
         }
     }
 }
