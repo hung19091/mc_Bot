@@ -12,6 +12,10 @@ const bot = mineflayer.createBot(config.BOT_OPTIONS);
 bot.loadPlugin(pathfinder);
 bot.loadPlugin(collectBlock);
 
+/**
+ * 安裝 bot 事件監聽（僅安裝一次），包含 spawn、私訊指令與錯誤處理。
+ * @param {import('mineflayer').Bot} botInstance
+ */
 function installBotEventHandlers(botInstance) {
   if (botInstance.__eventHandlersInstalled) {
     return;
@@ -92,12 +96,22 @@ function installBotEventHandlers(botInstance) {
 
 installBotEventHandlers(bot);
 
+/**
+ * 判斷訊息是否為主人對 bot 的私訊。
+ * @param {string} msg
+ * @returns {boolean}
+ */
 function isFromMasterPrivateMessage(msg) {
   const isFromMaster = msg.includes(config.MY_MASTER_ID);
   const isPrivateMessage = msg.includes('說') || msg.includes('私訊') || msg.includes('->') || msg.includes('密語') || msg.includes('w');
   return isFromMaster && isPrivateMessage;
 }
 
+/**
+ * 判斷訊息是否為傳送請求，符合時可自動 /tpaccept。
+ * @param {string} msg
+ * @returns {boolean}
+ */
 function isTeleportRequest(msg) {
   return msg.includes(config.MY_MASTER_ID) && (msg.includes('請求') || msg.includes('傳送') || msg.toLowerCase().includes('tpa'));
 }

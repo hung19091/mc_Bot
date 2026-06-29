@@ -34,6 +34,12 @@ function getAdjacentPositions(pos) {
 }
 
 // 從告示牌周圍找可互動箱子。
+/**
+ * 從指定告示牌座標的六個相鄰方塊中尋找箱子。
+ * @param {import('mineflayer').Bot} bot
+ * @param {any} pos
+ * @returns {any|null}
+ */
 function findAdjacentChest(bot, pos) {
     const directions = getAdjacentPositions(pos);
     for (const adjPos of directions) {
@@ -45,6 +51,12 @@ function findAdjacentChest(bot, pos) {
     return null;
 }
 
+/**
+ * 建立接近箱子的候選站位，按距離由近到遠排序供重試導航。
+ * @param {import('mineflayer').Bot} bot
+ * @param {any} chestBlock
+ * @returns {Array<{x:number,y:number,z:number}>}
+ */
 function buildChestNavigationTargets(bot, chestBlock) {
     const chestPos = chestBlock.position;
     const origin = bot.entity && bot.entity.position

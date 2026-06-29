@@ -173,6 +173,10 @@ function hasThreat() {
     return state.damageDetected;
 }
 
+/**
+ * 強制清理 pathfinder 內部狀態，降低上次導航殘留對後續流程的干擾。
+ * @param {import('mineflayer').Bot} bot
+ */
 function resetPathfinderState(bot) {
     if (!bot || !bot.pathfinder) {
         return;
@@ -217,12 +221,19 @@ async function enterMiningAfterEscape(bot) {
     });
 }
 
+/**
+ * 重置採礦卡點檢測狀態（基準位置、計時器、警告旗標）。
+ */
 function resetMiningIdleState() {
     state.miningLastPosition = null;
     state.miningIdleSince = null;
     state.miningIdleWarningShown = false;
 }
 
+/**
+ * 在採礦有實際進展時更新基準點，避免誤判為卡住。
+ * @param {import('mineflayer').Bot} bot
+ */
 function markMiningProgress(bot) {
     if (!state.isLoopRunning || !state.isInWild || state.currentState !== FSM_STATE.Mine || !bot || !bot.entity || !bot.entity.position) {
         return;
@@ -237,6 +248,11 @@ function markMiningProgress(bot) {
     state.miningIdleWarningShown = false;
 }
 
+/**
+ * 檢查 bot 是否在採礦狀態長時間停滯，超過門檻時回傳 true 供 FSM 觸發 /rtp。
+ * @param {import('mineflayer').Bot} bot
+ * @returns {boolean}
+ */
 function shouldRtpForMiningStuck(bot) {
     if (!state.isLoopRunning || !state.isInWild || state.currentState !== FSM_STATE.Mine || !bot.entity || !bot.entity.position) {
         return false;
@@ -297,6 +313,11 @@ function needSupplies(bot) {
     return !(hasShovel && hasPickaxe && hasSteak);
 }
 
+/**
+ * 依優先度挑選第一個 condition 成立的規則。
+ * @param {import('mineflayer').Bot} bot
+ * @returns {{name:string, priority:number, condition:Function, action:Function}|null}
+ */
 function pickRuleByPriority(bot) {
     // 遍歷排序好的 rules，取第一個 condition 為 true 的規則。
     for (const rule of sortedRules) {
@@ -312,6 +333,11 @@ function pickRuleByPriority(bot) {
     return null;  // 不應該發生（Mine 總是 true）
 }
 
+/**
+ * 緊急脫困流程：清理採礦與導航殘留狀態後執行 /rtp，並重新接回採礦。
+ * @param {import('mineflayer').Bot} bot
+ * @returns {Promise<void>}
+ */
 async function runEscape(bot) {
     console.log(`🏃 [Action] 偵測到危機或卡死，準備執行 /rtp...`);
 
@@ -515,10 +541,17 @@ async function tickStateMachine(bot) {
     }
 }
 
+/**
+ * 請求 FSM 在下一輪 tick 優先執行手動存倉流程。
+ */
 function requestStorage() {
     state.pendingStorage = true;
 }
 
+/**
+ * 啟動 FSM 主循環與規則引擎。
+ * @param {import('mineflayer').Bot} bot
+ */
 function startLoop(bot) {
     if (state.isLoopRunning && state.tickTimer) {
         console.log(`⚠️ [FSM] 已在運行中，忽略重複啟動`);
@@ -551,6 +584,9 @@ function startLoop(bot) {
     tickStateMachine(bot);
 }
 
+/**
+ * 停止 FSM 主循環並重置主要狀態。
+ */
 function stopLoop() {
     // stop 只做狀態重置與計時器清理，不移除事件監聽。
     console.log(`\n🛑 [FSM] === 停止主循環 ===`);

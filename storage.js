@@ -28,6 +28,12 @@ function getAdjacentPositions(pos) {
     ];
 }
 
+/**
+ * 產生可接近箱子的候選站位，並依與 bot 距離排序。
+ * @param {import('mineflayer').Bot} bot
+ * @param {any} chestBlock
+ * @returns {Array<{x:number,y:number,z:number}>}
+ */
 function buildChestNavigationTargets(bot, chestBlock) {
     const chestPos = chestBlock.position;
     const origin = bot.entity && bot.entity.position
@@ -53,6 +59,12 @@ function buildChestNavigationTargets(bot, chestBlock) {
     return candidates;
 }
 
+/**
+ * 取最優先的箱子接近目標，供外部快速導航使用。
+ * @param {import('mineflayer').Bot} bot
+ * @param {any} chestBlock
+ * @returns {any|null}
+ */
 function buildChestNavigationGoal(bot, chestBlock) {
     const [target] = buildChestNavigationTargets(bot, chestBlock);
     if (!target) {
@@ -74,6 +86,12 @@ function findAdjacentChest(bot, pos) {
     return null;
 }
 
+/**
+ * 依告示牌關鍵字尋找對應箱子，並將背包中非核心物資存入。
+ * @param {import('mineflayer').Bot} bot
+ * @param {string} [keyword='倉儲區']
+ * @returns {Promise<void>}
+ */
 async function storeAllItemsToSignChest(bot, keyword = '倉儲區') {
     try {
         const mcData = require('minecraft-data')(bot.version);

@@ -16,12 +16,26 @@ const MINING_CONFIG = {
 };
 
 // 供 FSM 與採礦流程共用的物品判斷工具。
+/**
+ * 檢查背包內符合關鍵字的物品數量是否達標。
+ * @param {import('mineflayer').Bot} bot
+ * @param {string} keyword
+ * @param {number} [minCount=1]
+ * @returns {boolean}
+ */
 function hasItem(bot, keyword, minCount = 1) {
     const items = bot.inventory.items().filter((item) => item.name.includes(keyword));
     const totalCount = items.reduce((sum, item) => sum + item.count, 0);
     return totalCount >= minCount;
 }
 
+/**
+ * 搜集可挖掘泥土目標並依高度差過濾，避免選到過高/過低方塊。
+ * @param {import('mineflayer').Bot} bot
+ * @param {any} mcData
+ * @param {typeof MINING_CONFIG} cfg
+ * @returns {Array<any>}
+ */
 function collectNearbyDirtTargets(bot, mcData, cfg) {
     if (!bot.entity || !bot.entity.position) {
         return [];
@@ -99,6 +113,14 @@ function clearMiningRuntimeState(bot) {
     } catch (e) { }
 }
 
+/**
+ * 執行單一方塊的導航與挖掘，並回傳可供 FSM 判斷的狀態。
+ * @param {import('mineflayer').Bot} bot
+ * @param {any} block
+ * @param {typeof MINING_CONFIG} cfg
+ * @param {{state?: {markMiningProgress?: Function}}} runtime
+ * @returns {Promise<{status:string, error?:string}>}
+ */
 async function mineSingleTarget(bot, block, cfg, runtime) {
     if (!block || !block.position) {
         return { status: 'invalid' };
@@ -175,6 +197,12 @@ async function mineSingleTarget(bot, block, cfg, runtime) {
     }
 }
 
+/**
+ * 採礦主流程單步：搜尋目標、嘗試挖掘並更新共享狀態。
+ * @param {import('mineflayer').Bot} bot
+ * @param {{mcData:any, loopConfig?:typeof MINING_CONFIG, state:any}} runtime
+ * @returns {Promise<void>}
+ */
 async function runMineStep(bot, runtime) {
     const cfg = runtime.loopConfig || MINING_CONFIG;
     const targets = collectNearbyDirtTargets(bot, runtime.mcData, cfg);
