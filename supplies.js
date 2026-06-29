@@ -45,6 +45,31 @@ function findAdjacentChest(bot, pos) {
     return null;
 }
 
+function buildChestNavigationTargets(bot, chestBlock) {
+    const chestPos = chestBlock.position;
+    const origin = bot.entity && bot.entity.position
+        ? bot.entity.position
+        : chestPos;
+
+    const botLevelY = Math.floor(origin.y);
+    const candidates = [
+        { x: chestPos.x + 1, y: botLevelY, z: chestPos.z },
+        { x: chestPos.x - 1, y: botLevelY, z: chestPos.z },
+        { x: chestPos.x, y: botLevelY, z: chestPos.z + 1 },
+        { x: chestPos.x, y: botLevelY, z: chestPos.z - 1 },
+        { x: chestPos.x + 1, y: botLevelY, z: chestPos.z + 1 },
+        { x: chestPos.x - 1, y: botLevelY, z: chestPos.z - 1 }
+    ];
+
+    candidates.sort((a, b) => {
+        const distA = Math.abs(a.x - origin.x) + Math.abs(a.y - origin.y) + Math.abs(a.z - origin.z);
+        const distB = Math.abs(b.x - origin.x) + Math.abs(b.y - origin.y) + Math.abs(b.z - origin.z);
+        return distA - distB;
+    });
+
+    return candidates;
+}
+
 /**
  * 檢查身上是否有特定物品
  * @param {Object} bot Mineflayer 實例
@@ -123,10 +148,35 @@ async function checkAndSupply(bot) {
 
         // 4. 走向箱子並打開
         console.log('🚶 [補給] 正在走向補給箱子...');
-        await bot.pathfinder.goto(new goals.GoalGetToBlock(targetChestBlock.position.x, targetChestBlock.position.y, targetChestBlock.position.z));
+        const navTargets = buildChestNavigationTargets(bot, targetChestBlock);
+        let chest = null;
 
-        const chest = await bot.openChest(targetChestBlock);
-        await sleep(SUPPLY_CONFIG.afterOpenChestWaitMs);
+        for (const target of navTargets) {
+            try {
+                if (bot.pathfinder && typeof bot.pathfinder.stop === 'function') {
+                    bot.pathfinder.stop();
+                }
+
+                await bot.pathfinder.goto(new goals.GoalNear(target.x, target.y, target.z, 1));
+                chest = await bot.openChest(targetChestBlock);
+                await sleep(SUPPLY_CONFIG.afterOpenChestWaitMs);
+                break;
+            } catch (navErr) {
+                console.log(`⚠️ [補給] 導航到 ${target.x},${target.y},${target.z} 失敗：`, navErr && navErr.message ? navErr.message : navErr);
+            }
+        }
+
+        if (!chest) {
+            console.log('⚠️ [補給] 導航全部失敗，直接嘗試開箱...');
+            try {
+                chest = await bot.openChest(targetChestBlock);
+                await sleep(SUPPLY_CONFIG.afterOpenChestWaitMs);
+            } catch (openErr) {
+                console.log('❌ [補給] 無法開啟箱子：', openErr && openErr.message ? openErr.message : openErr);
+                bot.chat(`/m ${MY_MASTER_ID} ❌ 無法靠近或開啟補給箱。`);
+                return false;
+            }
+        }
 
         // 5. 根據缺少的東西，精準拿取
         // 檢查箱子裡的物品清單
