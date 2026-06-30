@@ -116,7 +116,19 @@ test('runMineStep clears stale collectBlock state after timeout', async () => {
     const runtime = {
         mcData: { blocksByName: { dirt: { id: 1 } } },
         loopConfig: { ...mining.MINING_CONFIG, collectTimeoutMs: 20 },
-        state: { collectErrorCount: 0 }
+        state: {
+            collectErrorCount: 0,
+            markMiningProgress() { },
+            setIsInWild() { },
+            resetCollectErrorCount() {
+                this.collectErrorCount = 0;
+            },
+            incrementCollectErrorCount() {
+                this.collectErrorCount += 1;
+                return this.collectErrorCount;
+            },
+            setTargetCount() { }
+        }
     };
 
     await mining.runMineStep(bot, runtime);

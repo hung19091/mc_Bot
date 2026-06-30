@@ -113,49 +113,30 @@ function clearMiningRuntimeState(bot) {
     } catch (e) { }
 }
 
-function markRuntimeMiningProgress(runtime, bot) {
-    if (runtime && runtime.state && typeof runtime.state.markMiningProgress === 'function') {
-        runtime.state.markMiningProgress(bot);
+function requireMiningRuntimeState(runtime) {
+    if (!runtime || !runtime.state) {
+        throw new Error('runMineStep requires runtime.state callbacks.');
     }
+
+    const requiredCallbacks = [
+        'markMiningProgress',
+        'setIsInWild',
+        'resetCollectErrorCount',
+        'incrementCollectErrorCount',
+        'setTargetCount'
+    ];
+
+    for (const callbackName of requiredCallbacks) {
+        if (typeof runtime.state[callbackName] !== 'function') {
+            throw new Error(`runMineStep requires runtime.state.${callbackName}() callback.`);
+        }
+    }
+
+    return runtime.state;
 }
 
-function setRuntimeIsInWild(runtime, isInWild) {
-    if (!runtime || !runtime.state) {
-        return;
-    }
-
-    if (typeof runtime.state.setIsInWild === 'function') {
-        runtime.state.setIsInWild(isInWild);
-        return;
-    }
-
-    runtime.state.isInWild = isInWild;
-}
-
-function resetRuntimeCollectErrorCount(runtime) {
-    if (!runtime || !runtime.state) {
-        return;
-    }
-
-    if (typeof runtime.state.resetCollectErrorCount === 'function') {
-        runtime.state.resetCollectErrorCount();
-        return;
-    }
-
-    runtime.state.collectErrorCount = 0;
-}
-
-function incrementRuntimeCollectErrorCount(runtime) {
-    if (!runtime || !runtime.state) {
-        return 0;
-    }
-
-    if (typeof runtime.state.incrementCollectErrorCount === 'function') {
-        return runtime.state.incrementCollectErrorCount();
-    }
-
-    runtime.state.collectErrorCount = (runtime.state.collectErrorCount || 0) + 1;
-    return runtime.state.collectErrorCount;
+function markRuntimeMiningProgress(runtimeState, bot) {
+    runtimeState.markMiningProgress(bot);
 }
 
 /**
@@ -163,10 +144,10 @@ function incrementRuntimeCollectErrorCount(runtime) {
  * @param {import('mineflayer').Bot} bot
  * @param {any} block
  * @param {typeof MINING_CONFIG} cfg
- * @param {{state?: {markMiningProgress?: Function}}} runtime
+ * @param {{markMiningProgress:(bot: import('mineflayer').Bot)=>void}} runtimeState
  * @returns {Promise<{status:string, error?:string}>}
  */
-async function mineSingleTarget(bot, block, cfg, runtime) {
+async function mineSingleTarget(bot, block, cfg, runtimeState) {
     if (!block || !block.position) {
         return { status: 'invalid' };
     }
@@ -229,7 +210,7 @@ async function mineSingleTarget(bot, block, cfg, runtime) {
         ]);
 
         console.log(`[Mine] 方塊挖掘完成 ${blockSummary}`);
-        markRuntimeMiningProgress(runtime, bot);
+        markRuntimeMiningProgress(runtimeState, bot);
         return { status: 'success' };
     } catch (err) {
         const errorMessage = err && err.message ? err.message : String(err);
@@ -246,19 +227,18 @@ async function mineSingleTarget(bot, block, cfg, runtime) {
  * @param {{
  *   mcData:any,
  *   loopConfig?:typeof MINING_CONFIG,
- *   state?: {
- *     markMiningProgress?: Function,
- *     setIsInWild?: (isInWild:boolean) => void,
- *     resetCollectErrorCount?: () => void,
- *     incrementCollectErrorCount?: () => number,
- *     setTargetCount?: (count:number) => void,
- *     collectErrorCount?: number,
- *     isInWild?: boolean
+ *   state: {
+ *     markMiningProgress: (bot: import('mineflayer').Bot) => void,
+ *     setIsInWild: (isInWild:boolean) => void,
+ *     resetCollectErrorCount: () => void,
+ *     incrementCollectErrorCount: () => number,
+ *     setTargetCount: (count:number) => void
  *   }
  * }} runtime
  * @returns {Promise<void>}
  */
 async function runMineStep(bot, runtime) {
+    const runtimeState = requireMiningRuntimeState(runtime);
     const cfg = runtime.loopConfig || MINING_CONFIG;
     const targets = collectNearbyDirtTargets(bot, runtime.mcData, cfg);
     const position = bot.entity && bot.entity.position
@@ -268,9 +248,15 @@ async function runMineStep(bot, runtime) {
     console.log(`[Mine] runMineStep start: targetCount=${targets.length}, position=${position}`);
 
     // 回報目標數量給 FSM（供 shouldRtpForMiningStuck 判斷）
-    if (runtime && runtime.state && typeof runtime.state.setTargetCount === 'function') {
-        runtime.state.setTargetCount(targets.length);
+    runtimeState.setTargetCount(targets.length);
+
+    /*
+    if (targets.length === 0) {
+        console.log('⚠️ [FSM] 區塊內泥土已挖完，/rtp至新地點。');
+        runtimeState.setIsInWild(false);
+        return;
     }
+    */
 
     try {
         const timeoutMs = cfg.collectTimeoutMs || 15000;
@@ -278,30 +264,30 @@ async function runMineStep(bot, runtime) {
         console.log(`[Mine] 開始手動挖掘: timeout=${timeoutMs}ms, targets=${targets.length}, firstTargets=${targetSummary}`);
 
         for (const target of targets) {
-            const result = await mineSingleTarget(bot, target, cfg, runtime);
+            const result = await mineSingleTarget(bot, target, cfg, runtimeState);
             if (result.status === 'success') {
-                resetRuntimeCollectErrorCount(runtime);
+                runtimeState.resetCollectErrorCount();
                 return;
             }
 
             if (result.status === 'no_shovel') {
                 console.log('⚠️ [FSM] 工具遺失。');
-                setRuntimeIsInWild(runtime, false);
+                runtimeState.setIsInWild(false);
                 return;
             }
 
             if (result.status === 'pathfinder_unavailable') {
                 console.log('⚠️ [Mine] pathfinder 不可用，停止本輪。');
-                setRuntimeIsInWild(runtime, false);
+                runtimeState.setIsInWild(false);
                 return;
             }
         }
 
-        const collectErrorCount = incrementRuntimeCollectErrorCount(runtime);
+        const collectErrorCount = runtimeState.incrementCollectErrorCount();
         if (collectErrorCount >= cfg.maxCollectErrorsBeforeRtp) {
             console.log('⚠️ [FSM] 連續採集異常，切換到新地點 /rtp。');
-            setRuntimeIsInWild(runtime, false);
-            resetRuntimeCollectErrorCount(runtime);
+            runtimeState.setIsInWild(false);
+            runtimeState.resetCollectErrorCount();
         }
     } catch (err) {
         const errorMessage = err && err.message ? err.message : String(err);
