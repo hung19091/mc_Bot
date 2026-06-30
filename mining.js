@@ -113,6 +113,51 @@ function clearMiningRuntimeState(bot) {
     } catch (e) { }
 }
 
+function markRuntimeMiningProgress(runtime, bot) {
+    if (runtime && runtime.state && typeof runtime.state.markMiningProgress === 'function') {
+        runtime.state.markMiningProgress(bot);
+    }
+}
+
+function setRuntimeIsInWild(runtime, isInWild) {
+    if (!runtime || !runtime.state) {
+        return;
+    }
+
+    if (typeof runtime.state.setIsInWild === 'function') {
+        runtime.state.setIsInWild(isInWild);
+        return;
+    }
+
+    runtime.state.isInWild = isInWild;
+}
+
+function resetRuntimeCollectErrorCount(runtime) {
+    if (!runtime || !runtime.state) {
+        return;
+    }
+
+    if (typeof runtime.state.resetCollectErrorCount === 'function') {
+        runtime.state.resetCollectErrorCount();
+        return;
+    }
+
+    runtime.state.collectErrorCount = 0;
+}
+
+function incrementRuntimeCollectErrorCount(runtime) {
+    if (!runtime || !runtime.state) {
+        return 0;
+    }
+
+    if (typeof runtime.state.incrementCollectErrorCount === 'function') {
+        return runtime.state.incrementCollectErrorCount();
+    }
+
+    runtime.state.collectErrorCount = (runtime.state.collectErrorCount || 0) + 1;
+    return runtime.state.collectErrorCount;
+}
+
 /**
  * 執行單一方塊的導航與挖掘，並回傳可供 FSM 判斷的狀態。
  * @param {import('mineflayer').Bot} bot
@@ -184,9 +229,7 @@ async function mineSingleTarget(bot, block, cfg, runtime) {
         ]);
 
         console.log(`[Mine] 方塊挖掘完成 ${blockSummary}`);
-        if (runtime && runtime.state && typeof runtime.state.markMiningProgress === 'function') {
-            runtime.state.markMiningProgress(bot);
-        }
+        markRuntimeMiningProgress(runtime, bot);
         return { status: 'success' };
     } catch (err) {
         const errorMessage = err && err.message ? err.message : String(err);
@@ -200,7 +243,19 @@ async function mineSingleTarget(bot, block, cfg, runtime) {
 /**
  * 採礦主流程單步：搜尋目標、嘗試挖掘並更新共享狀態。
  * @param {import('mineflayer').Bot} bot
- * @param {{mcData:any, loopConfig?:typeof MINING_CONFIG, state:any}} runtime
+ * @param {{
+ *   mcData:any,
+ *   loopConfig?:typeof MINING_CONFIG,
+ *   state?: {
+ *     markMiningProgress?: Function,
+ *     setIsInWild?: (isInWild:boolean) => void,
+ *     resetCollectErrorCount?: () => void,
+ *     incrementCollectErrorCount?: () => number,
+ *     setTargetCount?: (count:number) => void,
+ *     collectErrorCount?: number,
+ *     isInWild?: boolean
+ *   }
+ * }} runtime
  * @returns {Promise<void>}
  */
 async function runMineStep(bot, runtime) {
@@ -212,10 +267,9 @@ async function runMineStep(bot, runtime) {
 
     console.log(`[Mine] runMineStep start: targetCount=${targets.length}, position=${position}`);
 
-    if (targets.length === 0) {
-        console.log('⚠️ [FSM] 區塊內泥土已挖完，/rtp至新地點。');
-        runtime.state.isInWild = false;
-        return;
+    // 回報目標數量給 FSM（供 shouldRtpForMiningStuck 判斷）
+    if (runtime && runtime.state && typeof runtime.state.setTargetCount === 'function') {
+        runtime.state.setTargetCount(targets.length);
     }
 
     try {
@@ -226,28 +280,28 @@ async function runMineStep(bot, runtime) {
         for (const target of targets) {
             const result = await mineSingleTarget(bot, target, cfg, runtime);
             if (result.status === 'success') {
-                runtime.state.collectErrorCount = 0;
+                resetRuntimeCollectErrorCount(runtime);
                 return;
             }
 
             if (result.status === 'no_shovel') {
                 console.log('⚠️ [FSM] 工具遺失。');
-                runtime.state.isInWild = false;
+                setRuntimeIsInWild(runtime, false);
                 return;
             }
 
             if (result.status === 'pathfinder_unavailable') {
                 console.log('⚠️ [Mine] pathfinder 不可用，停止本輪。');
-                runtime.state.isInWild = false;
+                setRuntimeIsInWild(runtime, false);
                 return;
             }
         }
 
-        runtime.state.collectErrorCount += 1;
-        if (runtime.state.collectErrorCount >= cfg.maxCollectErrorsBeforeRtp) {
+        const collectErrorCount = incrementRuntimeCollectErrorCount(runtime);
+        if (collectErrorCount >= cfg.maxCollectErrorsBeforeRtp) {
             console.log('⚠️ [FSM] 連續採集異常，切換到新地點 /rtp。');
-            runtime.state.isInWild = false;
-            runtime.state.collectErrorCount = 0;
+            setRuntimeIsInWild(runtime, false);
+            resetRuntimeCollectErrorCount(runtime);
         }
     } catch (err) {
         const errorMessage = err && err.message ? err.message : String(err);

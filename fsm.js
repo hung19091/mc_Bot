@@ -52,7 +52,8 @@ const state = {
     currentState: FSM_STATE.Idle,
     miningLastPosition: null,
     miningIdleSince: null,
-    miningIdleWarningShown: false
+    miningIdleWarningShown: false,
+    lastMiningTargetCount: null
 };
 
 // Rule Engine：優先權表驅動決策。排序一次在 startLoop，避免每 tick 重排。
@@ -214,11 +215,28 @@ async function enterMiningAfterEscape(bot) {
     await mining.runMineStep(bot, {
         mcData: state.mcData,
         loopConfig: mining.MINING_CONFIG,
-        state: {
-            ...state,
-            markMiningProgress: () => markMiningProgress(bot)
-        }
+        state: buildMiningRuntimeState(bot)
     });
+}
+
+function buildMiningRuntimeState(bot) {
+    return {
+        markMiningProgress: () => markMiningProgress(bot),
+        setIsInWild: (isInWild) => {
+            state.isInWild = Boolean(isInWild);
+        },
+        resetCollectErrorCount: () => {
+            state.collectErrorCount = 0;
+        },
+        incrementCollectErrorCount: () => {
+            state.collectErrorCount += 1;
+            return state.collectErrorCount;
+        },
+        getCollectErrorCount: () => state.collectErrorCount,
+        setTargetCount: (count) => {
+            state.lastMiningTargetCount = count;
+        }
+    };
 }
 
 /**
@@ -275,8 +293,8 @@ function shouldRtpForMiningStuck(bot) {
     const dz = currentPos.z - state.miningLastPosition.z;
     const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
-    // 3. 判定是否還卡在原地 (移動範圍小於 2.0 格都算卡住)
-    const isStuck = distance < 2.0;
+    // 3. 判定是否還卡在原地（低於設定半徑都算卡住）
+    const isStuck = distance < LOOP_CONFIG.miningStuckCheckRadius;
 
     if (!isStuck) {
         // 只有當 bot 真的大範圍移動了（代表有認真在挖並前進），才更新基準點與重置計時器
@@ -284,6 +302,13 @@ function shouldRtpForMiningStuck(bot) {
         state.miningIdleSince = Date.now();
         state.miningIdleWarningShown = false;
         return false;
+    }
+
+    // 3b. 檢查區塊是否無目標（若上輪採礦沒找到泥土，應立即 RTP）
+    if (state.lastMiningTargetCount === 0) {
+        console.log(`⚠️ [FSM] 區塊內泥土已挖完，執行 /rtp。`);
+        resetMiningIdleState();
+        return true;
     }
 
     // 4. 計算卡住的時間
@@ -488,10 +513,7 @@ async function runMine(bot) {
     await mining.runMineStep(bot, {
         mcData: state.mcData,
         loopConfig: mining.MINING_CONFIG,
-        state: {
-            ...state,
-            markMiningProgress: () => markMiningProgress(bot)
-        }
+        state: buildMiningRuntimeState(bot)
     });
 
     const after = {
